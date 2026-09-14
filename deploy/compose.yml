@@ -1,0 +1,34 @@
+services:
+  immich-placenames:
+    profiles: [placenames]
+    image: ${IMMICH_PLACENAMES_IMAGE:-immich-placenames:local}
+    pull_policy: never
+    environment:
+      DB_HOST: ${DB_HOST:-database}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_USERNAME: ${DB_USERNAME:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      DB_DATABASE_NAME: ${DB_DATABASE_NAME:-immich}
+    command: [run, -data, /data]
+    volumes:
+      - ${IMMICH_PLACENAMES_DATA:-./data}:/data
+    networks: [immich]
+    restart: "no"
+    stop_grace_period: 1m
+    mem_limit: 2g
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges=true
+    cap_drop: [ALL]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  immich:
+    external: true
+    name: ${IMMICH_NETWORK:-immich_default}

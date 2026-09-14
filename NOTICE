@@ -1,0 +1,24 @@
+immich-placenames began as a Go port of immich-reversegeo, AGPL-3.0,
+https://github.com/immich-reversegeo/immich-reversegeo; see LICENSE.
+Carried over from it: internal/overture/profiles.json, its city-resolver
+catalog with alpha-2 keys, and the rule tests in
+internal/overture/overture_test.go.
+
+The caches under data/ hold Overture Maps data, fetched on the machine
+and never committed. Attribution per
+https://docs.overturemaps.org/attribution/:
+
+  (c) OpenStreetMap contributors, Overture Maps Foundation
+
+Divisions theme, Open Database License (ODbL):
+- OpenStreetMap contributors, ODbL
+- geoBoundaries, CC BY 4.0
+- Esri Community Maps contributors, CC BY 4.0
+- Land Information New Zealand (LINZ), CC BY 4.0
+
+Base theme, infrastructure type, ODbL:
+- OpenStreetMap contributors, ODbL
+- Daylight Map Distribution
+- ESA WorldCover, CC BY 4.0
+- ETOPO1, Open Data Commons Public Domain Dedication and License
+- GLOBathy, CC0 1.0

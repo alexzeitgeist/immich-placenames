@@ -1,0 +1,7 @@
+/data/
+/immich-placenames
+.env
+.env.*
+!.env.example
+*.geo
+*.geo.tmp-*

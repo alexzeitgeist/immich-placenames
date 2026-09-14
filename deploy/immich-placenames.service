@@ -1,0 +1,17 @@
+[Unit]
+Description=Name Immich assets with immich-placenames
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=45min
+WorkingDirectory=/opt/immich-placenames
+ExecStart=/usr/bin/docker compose --project-directory /opt/immich-placenames -f /opt/immich-placenames/compose.yml --profile placenames run --rm --no-deps immich-placenames run -data /data
+Nice=10
+ProtectSystem=strict
+ReadWritePaths=/opt/immich-placenames/data
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes

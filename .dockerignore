@@ -1,0 +1,16 @@
+**
+!Dockerfile
+!.dockerignore
+!go.mod
+!go.sum
+!LICENSE
+!NOTICE
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+
+**/*_test.go
+**/testdata/
+**/*.geo
+**/*.tmp-*

@@ -1,0 +1,20 @@
+{
+  "defaultProfile": {
+    "language": "en",
+    "airports": true,
+    "fallbackDistance": 0.01,
+    "preferredSubtypes": ["locality", "borough", "localadmin", "macrohood", "neighborhood", "microhood"],
+    "tieBreakMode": "smallest-area",
+    "stateSubtypes": ["region", "macroregion", "county", "macrocounty", "dependency"]
+  },
+  "countryOverrides": {
+    "HR": {
+      "preferredSubtypes": ["county", "locality", "borough", "localadmin", "macrohood", "neighborhood", "microhood"],
+      "tieBreakMode": "largest-area"
+    },
+    "IN": {
+      "preferredSubtypes": ["locality", "borough", "localadmin", "macrohood", "neighborhood", "microhood", "county"],
+      "tieBreakMode": "smallest-area"
+    }
+  }
+}
