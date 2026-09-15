@@ -176,9 +176,7 @@ Try it on a coordinate first:
 
 ### When nothing names the city
 
-If no boundary or label supplies a city, the default fallback copies the state, or the country if the state is empty. With this fallback, a photo in the Everglades gets `Florida, Florida, United States`.
-
-The bundled US profile tries a county first:
+When no city is found, most countries use the state name, then the country name if the state is empty. The US profile tries the county first, so an Everglades photo gets `Monroe County, Florida, United States` instead of `Florida, Florida, United States`:
 
 ```json
 {
@@ -190,19 +188,21 @@ The bundled US profile tries a county first:
 }
 ```
 
-This gives `Monroe County, Florida, United States` at the Everglades example below. Other examples include `Inyo County, California, United States` in Death Valley and `San Francisco, California, United States` in San Francisco Bay.
+Other examples include `Inyo County, California, United States` in Death Valley and `San Francisco, California, United States` in San Francisco Bay.
 
 You can configure division subtypes for other countries too. To leave the city empty, set `"cityFallback": []`. The writer stores an empty city as NULL.
 
-The resolver tries `state`, `country` and division subtypes in the listed order. For a subtype, it uses the same ranking as state selection: a containing division first, then the nearest within `fallbackDistance`. It skips names matched by `rejectNamePrefixes` and tries the next source if no candidate remains.
+List fallback sources in the order you want to try them. You can use `state`, `country` or a division subtype such as `county`. A subtype uses a containing boundary, or a nearby one within `fallbackDistance`, ranked as described in [boundary selection](DESIGN.md#boundary-selection). Rejected names are skipped; if no eligible boundary remains, the next source is tried.
 
-The resolver applies `cityFallback` after nearest-division matching, point fallback, airports and city overrides, and only if the city is empty. A county in this list leaves a nearby locality's name intact. Putting county in `preferredSubtypes` gives a containing county priority over nearby localities. The fallback leaves the state and country unchanged.
+Use `cityFallback` when you want to keep city and airport names and fill only an empty city. It runs after city overrides and leaves the state and country unchanged. Putting `county` in `preferredSubtypes` instead can replace a nearby locality's name with the containing county.
 
-Try it on a coordinate first:
+Try the bundled US setting:
 
 ```sh
-./immich-placenames lookup -profiles data/try.json 25.4 -80.9
+./immich-placenames lookup 25.4 -80.9
 ```
+
+To compare your own settings, save a profile and pass `-profiles FILE` to `lookup`. Preview changes to existing photos with `run -dry-run -all` before writing them.
 
 The lookup prints the source on a `city fallback:` line and marks the selected division `city fallback`. `run -dry-run` counts the filled cities by source on its `# fallback` line.
 
@@ -230,15 +230,15 @@ Overrides apply only to resolved city names. They leave state and country fields
 
 ### Skipping names
 
-The German profile prefers counties to keep city names such as Stuttgart or Munich. To avoid district and administrative association names for rural photos, it rejects six prefixes:
+The German profile skips district and administrative association names so you get municipality names where available:
 
 ```json
 "rejectNamePrefixes": ["Landkreis ", "Kreis ", "GVV ", "VVG ", "Samtgemeinde ", "Verwaltungsgemeinschaft "]
 ```
 
-The first two prefixes exclude districts; the other four exclude administrative associations. Overture classifies `GVV Jestetten`, `VVG der Stadt Konstanz` and `Samtgemeinde Bersenbrück` as `locality`, just like their member municipalities. The German profile prefers the largest bounding box when other rankings tie. Rejecting only district names therefore gives `GVV Jestetten` instead of `Jestetten`.
+The first two prefixes exclude districts; the other four exclude administrative associations. Without the association prefixes, you can get `GVV Jestetten` instead of `Jestetten`, or `Samtgemeinde Bersenbrück` instead of `Bersenbrück`. Overture classifies both associations and municipalities as localities, and the German profile prefers the larger boundary when other rankings tie.
 
-Cities that are counties of their own, such as Stuttgart, have none of these prefixes and keep their names.
+Cities that are counties of their own, such as Stuttgart, keep their names because none of these prefixes match.
 
 These prefixes were checked against Overture release `2026-08-19.0`; they may not cover every association name. The list excludes `Amt ` because municipalities such as Amt Neuhaus use it.
 
@@ -254,14 +254,14 @@ To name German photos after their district again, clear the list:
 }
 ```
 
-With `smallest-area`, the resolver can select a village within the municipality:
+For village names within a municipality, set `"tieBreakMode": "smallest-area"` in your DE profile:
 
 | Setting | At Jestetten | At Litzelstetten near Konstanz |
 |---|---|---|
 | Bundled | Jestetten | Constance |
 | `"tieBreakMode": "smallest-area"` | Jestetten | Litzelstetten |
 
-Choose municipality or village names to suit your library. Both rows use English names. With `"language": "de"`, `Constance` becomes `Konstanz`; `Litzelstetten` stays the same.
+Both rows use English names. With `"language": "de"`, `Constance` becomes `Konstanz`; `Litzelstetten` stays the same.
 
 No other country rejects prefixes by default. If you set prefixes in `defaultProfile`, use `"rejectNamePrefixes": []` in a country override to clear the inherited list.
 

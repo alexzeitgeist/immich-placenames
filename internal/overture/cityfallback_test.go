@@ -215,6 +215,49 @@ func TestCityFallbackDoesNotPreemptNearerNames(t *testing.T) {
 	}
 }
 
+func TestCityFallbackAfterPointsAndAirports(t *testing.T) {
+	dir := t.TempDir()
+	writeFallbackCaches(t, dir,
+		division{"region", "Region", "region", 0, 1},
+		division{"county", "County", "county", 0, 0.5})
+	writeLabels(t, PointsPath(dir, "CH"), label{"label", "Label", "locality", 0, 0})
+	writeCache(t, AirportsPath(dir), cache.Row{ID: "airport", Name: "Airport", Subtype: "airport", Class: "airport", Bbox: unitBox})
+	for _, tc := range []struct{ name, profile, city, source string }{
+		{"point", `{"airports":false}`, "Label", ""},
+		{"airport", `{}`, "Airport", ""},
+		{"override", `{"cityOverrides":[{"from":"Airport","to":"Renamed"}]}`, "Renamed", ""},
+		{"cleared airport", `{"cityOverrides":[{"from":"Airport","to":""}]}`, "County", "county"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			profiles, _ := writeProfileCatalog(t, t.TempDir(),
+				`{"defaultProfile":{"pointFallback":true,"cityFallback":["county","state"]},"countryOverrides":{"CH":`+tc.profile+`}}`)
+			p := New(dir, profiles, nil, nil)
+			defer p.Close()
+			e, err := p.Explain(context.Background(), geocode.Point{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e.Result.City != tc.city || e.CityFilledFrom != tc.source {
+				t.Errorf("city %q from %q; want %q from %q", e.Result.City, e.CityFilledFrom, tc.city, tc.source)
+			}
+			want := map[string]int{}
+			if tc.source != "" {
+				want[tc.source] = 1
+			}
+			if !reflect.DeepEqual(p.Filled(), want) {
+				t.Errorf("fallback counts %v; want %v", p.Filled(), want)
+			}
+			if got := p.Served(); !reflect.DeepEqual(got, map[string]int{"en": 3}) {
+				t.Errorf("name counts %v; want en=3", got)
+			}
+			res, err := p.Resolve(context.Background(), geocode.Point{})
+			if err != nil || res != e.Result {
+				t.Errorf("Resolve = %+v, %v; Explain = %+v", res, err, e.Result)
+			}
+		})
+	}
+}
+
 func TestCityFallbackReusesSelectedDivisions(t *testing.T) {
 	for _, tc := range []struct {
 		name, profile, state, country, decision string

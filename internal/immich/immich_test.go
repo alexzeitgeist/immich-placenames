@@ -527,6 +527,47 @@ func TestWritePageSuccess(t *testing.T) {
 	}
 }
 
+func TestWriteEmptyCity(t *testing.T) {
+	for _, all := range []bool{false, true} {
+		t.Run(fmt.Sprintf("all=%t", all), func(t *testing.T) {
+			f := newTestFixture(t)
+			row := fixtureAsset{ID: testID(12), CreatedAt: time.Now(), Lat: 12, Lon: 12}
+			if all {
+				row.City, row.State, row.Country = stringPtr("Old City"), stringPtr("Old State"), stringPtr("Old Country")
+			}
+			f.seed(t, []fixtureAsset{row})
+			ctx := context.Background()
+			assets, err := SelectPage(ctx, f.conn, all, nil, nil, 1)
+			if err != nil || len(assets) != 1 {
+				t.Fatalf("SelectPage = %v, %v", assets, err)
+			}
+			written, err := Write(ctx, f.conn, Update{Asset: assets[0], Country: "Country"}, all, true)
+			if err != nil || !written {
+				t.Fatalf("Write = %t, %v", written, err)
+			}
+			var city, state *string
+			var country string
+			var locked []string
+			err = f.conn.QueryRow(ctx, `SELECT city, state, country, "lockedProperties" FROM asset_exif WHERE "assetId" = $1::uuid`, row.ID).Scan(&city, &state, &country, &locked)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if city != nil || state != nil || country != "Country" {
+				t.Fatalf("stored city=%v state=%v country=%q; want NULL, NULL, Country", city, state, country)
+			}
+			for _, property := range []string{"city", "state", "country"} {
+				if !slices.Contains(locked, property) {
+					t.Errorf("locks=%v, missing %s", locked, property)
+				}
+			}
+			pending, err := SelectPage(ctx, f.conn, false, nil, nil, 0)
+			if err != nil || len(pending) != 0 {
+				t.Fatalf("pending after write = %v, %v", pending, err)
+			}
+		})
+	}
+}
+
 func TestWriteConditionsAndLock(t *testing.T) {
 	f := newTestFixture(t)
 	ts := time.Date(2026, 9, 13, 14, 0, 0, 0, time.UTC)
