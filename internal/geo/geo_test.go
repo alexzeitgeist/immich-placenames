@@ -3,7 +3,9 @@ package geo
 import (
 	"encoding/binary"
 	"math"
+	"slices"
 	"testing"
+	"time"
 )
 
 // encodePolygon encodes rings as WKB in the given byte order.
@@ -156,28 +158,121 @@ func TestHaversine(t *testing.T) {
 	}
 }
 
+// near compares distances, +Inf included.
+func near(a, b float64) bool { return a == b || math.Abs(a-b) <= 1e-9 }
+
 func TestLocate(t *testing.T) {
 	g, err := Decode(encodePolygon(binary.LittleEndian, outer, hole))
 	if err != nil {
 		t.Fatal(err)
 	}
+	inf := math.Inf(1)
 	cases := []struct {
-		x, y float64
-		in   bool
-		d    float64
+		x, y, bound float64
+		in          bool
+		d           float64
 	}{
-		{2, 2, true, 0},
-		{5, 5, false, 1},
-		{10.0001, 5, true, 0.0001},
-		{10.005, 5, false, 0.005},
-		{13, 14, false, 5},
+		{2, 2, inf, true, 0},
+		{5, 5, inf, false, 1},
+		{10.0001, 5, inf, true, 0.0001},
+		{10.005, 5, inf, false, 0.005},
+		{13, 14, inf, false, 5},
+		// Bounds below Tolerance must still preserve containment.
+		{2, 2, 0, true, 0},
+		{10.0001, 5, 0, true, 0.0001},
+		{10.005, 5, 0.0051, false, 0.005},
+		{10.005, 5, 0.0049, false, inf},
+		{13, 14, 1, false, inf},
+		// Distances equal to the bound pass both cutoffs. The hole
+		// tests only the distance cutoff, since its box distance is zero.
+		{11, 5, 1, false, 1},
+		{13, 14, 5, false, 5},
+		{5, 5, 1, false, 1},
 	}
 	for _, c := range cases {
-		if in, d := g.Locate(c.x, c.y); in != c.in || math.Abs(d-c.d) > 1e-9 {
-			t.Errorf("(%g,%g): got %v %.6f, want %v %.6f", c.x, c.y, in, d, c.in, c.d)
+		if in, d := g.Locate(c.x, c.y, c.bound); in != c.in || !near(d, c.d) {
+			t.Errorf("(%g,%g) bound %g: got %v %.6f, want %v %.6f", c.x, c.y, c.bound, in, d, c.in, c.d)
 		}
 	}
-	if in, d := (&Geometry{empty: true}).Locate(0, 0); in || !math.IsInf(d, 1) {
+	if in, d := (&Geometry{empty: true}).Locate(0, 0, inf); in || !math.IsInf(d, 1) {
 		t.Errorf("empty: %v %v", in, d)
+	}
+}
+
+// The geometry box spans the antimeridian gap; the polygon boxes exclude it.
+func TestPolygonBoxesSkipTheGap(t *testing.T) {
+	west := encodePolygon(binary.LittleEndian, []float64{-180, -10, -170, -10, -170, 10, -180, 10, -180, -10})
+	east := encodePolygon(binary.LittleEndian, []float64{170, -10, 180, -10, 180, 10, 170, 10, 170, -10})
+	g, err := Decode(wkbMulti(binary.LittleEndian, wkbMultiPolygon, west, east))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Bbox() != (Bbox{-180, -10, 180, 10}) {
+		t.Errorf("bbox %+v", g.Bbox())
+	}
+	if !g.Contains(-175, 0) || !g.Contains(175, 0) || g.Contains(0, 0) {
+		t.Error("containment across the gap")
+	}
+	if d := g.Distance(0, 0); d != 170 {
+		t.Errorf("distance across the gap %g, want 170", d)
+	}
+	if in, d := g.Locate(0, 0, 1); in || !math.IsInf(d, 1) {
+		t.Errorf("bounded locate in the gap: %v %g", in, d)
+	}
+}
+
+// circle returns a closed ring of n vertices of radius r around cx,cy.
+func circle(cx, cy, r float64, n int) []float64 {
+	ring := make([]float64, 0, 2*n+2)
+	for i := 0; i < n; i++ {
+		a := 2 * math.Pi * float64(i) / float64(n)
+		ring = append(ring, cx+r*math.Cos(a), cy+r*math.Sin(a))
+	}
+	return append(ring, ring[0], ring[1])
+}
+
+var sink float64
+
+func perOp(n int, f func()) time.Duration {
+	start := time.Now()
+	for range n {
+		f()
+	}
+	return time.Since(start) / time.Duration(n)
+}
+
+// Compare bounded lookup with exact Distance, which also prunes polygons.
+// The median reduces scheduling noise; the ratio allows for slower runners.
+func TestBoundedLocateSkipsDistantPolygons(t *testing.T) {
+	const polys, vertices = 128, 512
+	parts := make([][]byte, 0, polys+1)
+	for i := range polys {
+		parts = append(parts, encodePolygon(binary.LittleEndian, circle(float64(i)*4, 0, 1, vertices)))
+	}
+	// One far polygon stretches the geometry's own box over the query point.
+	parts = append(parts, encodePolygon(binary.LittleEndian, circle(256, 80, 1, vertices)))
+	g, err := Decode(wkbMulti(binary.LittleEndian, wkbMultiPolygon, parts...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const x, y = 256, 40
+	if !g.Bbox().Contains(x, y) {
+		t.Fatalf("query outside the geometry box %+v", g.Bbox())
+	}
+	if in, d := g.Locate(x, y, Tolerance); in || !math.IsInf(d, 1) {
+		t.Fatalf("locate %v %g, want no match", in, d)
+	}
+	if n := testing.AllocsPerRun(50, func() { _, d := g.Locate(x, y, Tolerance); sink += d }); n != 0 {
+		t.Errorf("%v allocations per locate", n)
+	}
+	ratios := make([]float64, 5)
+	for i := range ratios {
+		bounded := perOp(5000, func() { _, d := g.Locate(x, y, Tolerance); sink += d })
+		exact := perOp(20, func() { sink += g.Distance(x, y) })
+		ratios[i] = float64(exact) / float64(bounded)
+	}
+	slices.Sort(ratios)
+	if ratio := ratios[len(ratios)/2]; ratio < 20 {
+		t.Errorf("exact distance / bounded locate median ratio %.1fx, want at least 20x: the polygon boxes are not skipping enough work", ratio)
 	}
 }

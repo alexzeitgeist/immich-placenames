@@ -6,9 +6,13 @@ immich-placenames is a CLI built as one static Go binary. The `run` command make
 
 `world.geo` includes countries and dependency territories. They can overlap: Gibraltar wins over Spain's territorial polygon on bounding-box size; both are territorial.
 
-The resolver finds a country in `world.geo`, then reads that country's divisions. It checks bounding boxes before testing geometry, using even-odd containment with an edge tolerance of 0.00015 degrees.
+The resolver finds a country in `world.geo`, then reads that country's divisions. It checks bounding boxes before testing geometry, using even-odd containment with an edge tolerance of 0.00015 degrees. Each polygon has its own box, so lookups can skip distant parts of countries that cross the antimeridian.
 
-Candidates rank in this order:
+Distance checks use the edge tolerance for countries and airports. Divisions use the larger of `fallbackDistance` and the edge tolerance. Candidates beyond these limits cannot affect the result. `lookup` uses exact distances for its diagnostic report.
+
+Decoding allocates the polygon boxes once. Geometry lookups reuse them to skip boundary scans without allocating.
+
+Exact containment and matches within the edge tolerance use the same ranking:
 
 | Result | Ranking |
 |---|---|

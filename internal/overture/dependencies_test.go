@@ -25,7 +25,7 @@ func insidePoint(g *geo.Geometry) (geocode.Point, bool) {
 	const bearings = 64
 	x, y := g.Bbox().Center()
 	for round := 0; round < 24; round++ {
-		if in, _ := g.Locate(x, y); in {
+		if in, _ := g.Locate(x, y, geo.Tolerance); in {
 			return geocode.Point{Lat: y, Lon: x}, true
 		}
 		d := g.Distance(x, y)

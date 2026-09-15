@@ -30,6 +30,12 @@ REVERSEGEO_DATA="$PWD/data" go test ./internal/overture -run 'TestOracle|TestSea
 
 You need `world.geo`, `airports.geo` and `divisions/{AT,CH,DE,HR,ID,IN,US}.geo`, all from the release above. The HR cache must include primary names and German translations. Git ignores the caches.
 
+The benchmarks use the same caches and measure lookups after decoding the geometry:
+
+```sh
+REVERSEGEO_DATA="$PWD/data" go test ./internal/overture -run '^$' -bench 'Country|Resolve'
+```
+
 Dependency tests need only `world.geo`:
 
 ```sh

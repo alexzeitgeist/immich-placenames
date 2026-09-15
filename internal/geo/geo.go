@@ -25,6 +25,13 @@ func (b Bbox) Contains(lon, lat float64) bool {
 	return lon >= b.XMin && lon <= b.XMax && lat >= b.YMin && lat <= b.YMax
 }
 
+// Distance is the planar distance in degrees from the point to the box, zero inside.
+func (b Bbox) Distance(lon, lat float64) float64 {
+	dx := math.Max(0, math.Max(b.XMin-lon, lon-b.XMax))
+	dy := math.Max(0, math.Max(b.YMin-lat, lat-b.YMax))
+	return math.Hypot(dx, dy)
+}
+
 // Intersects reports whether the boxes overlap or touch.
 func (b Bbox) Intersects(o Bbox) bool {
 	return b.XMax >= o.XMin && b.XMin <= o.XMax && b.YMax >= o.YMin && b.YMin <= o.YMax
@@ -47,6 +54,7 @@ func (b Bbox) Expand(d float64) Bbox { return Bbox{b.XMin - d, b.YMin - d, b.XMa
 // Geometry is a decoded WKB geometry: polygons with holes, lines and points.
 type Geometry struct {
 	polys  [][][]float64 // polygon → ring → x0,y0,x1,y1,...; the first ring is the outer one
+	boxes  []Bbox        // one box per polygon
 	lines  [][]float64
 	points []float64
 	bbox   Bbox
@@ -62,30 +70,40 @@ func (g *Geometry) Contains(lon, lat float64) bool {
 	if g.empty || !g.bbox.Expand(Tolerance).Contains(lon, lat) {
 		return false
 	}
-	in, _ := g.Locate(lon, lat)
+	in, _ := g.Locate(lon, lat, Tolerance)
 	return in
 }
 
-// Locate reports Contains and the planar distance in degrees to the nearest
-// edge or point: zero inside a polygon, +Inf for an empty geometry.
-func (g *Geometry) Locate(lon, lat float64) (bool, float64) {
+// Locate reports containment and planar distance in degrees: zero inside a
+// polygon, +Inf for empty geometry or beyond max(bound, Tolerance).
+// Containment always includes points within Tolerance of an edge or point.
+func (g *Geometry) Locate(lon, lat, bound float64) (bool, float64) {
 	if g.empty {
 		return false, math.Inf(1)
 	}
-	for _, poly := range g.polys {
-		if polygonContains(poly, lon, lat) {
+	for i, poly := range g.polys {
+		if g.boxes[i].Contains(lon, lat) && polygonContains(poly, lon, lat) {
 			return true, 0
 		}
 	}
-	d := g.Distance(lon, lat)
+	d := g.distanceWithin(lon, lat, math.Max(bound, Tolerance))
 	return d <= Tolerance, d
 }
 
 // Distance is the planar distance in degrees from the point to the nearest
 // edge or vertex of the geometry, or +Inf for an empty geometry.
 func (g *Geometry) Distance(lon, lat float64) float64 {
+	return g.distanceWithin(lon, lat, math.Inf(1))
+}
+
+// distanceWithin returns +Inf beyond bound. Polygon boxes give a lower bound
+// on edge distance, so polygons beyond min(d, bound) can be skipped.
+func (g *Geometry) distanceWithin(lon, lat, bound float64) float64 {
 	d := math.Inf(1)
-	for _, poly := range g.polys {
+	for i, poly := range g.polys {
+		if g.boxes[i].Distance(lon, lat) > math.Min(d, bound) {
+			continue
+		}
 		for _, ring := range poly {
 			d = math.Min(d, ringDistance(ring, lon, lat))
 		}
@@ -95,6 +113,9 @@ func (g *Geometry) Distance(lon, lat float64) float64 {
 	}
 	for i := 0; i+1 < len(g.points); i += 2 {
 		d = math.Min(d, math.Hypot(g.points[i]-lon, g.points[i+1]-lat))
+	}
+	if d > bound {
+		return math.Inf(1)
 	}
 	return d
 }
@@ -331,27 +352,34 @@ func (d *decoder) geometry() error {
 	return nil
 }
 
+// finish records a box for each polygon and the geometry's own box.
 func (g *Geometry) finish() {
-	b := Bbox{math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)}
-	add := func(c []float64) {
-		for i := 0; i+1 < len(c); i += 2 {
-			b.XMin = math.Min(b.XMin, c[i])
-			b.XMax = math.Max(b.XMax, c[i])
-			b.YMin = math.Min(b.YMin, c[i+1])
-			b.YMax = math.Max(b.YMax, c[i+1])
-		}
-	}
-	for _, poly := range g.polys {
+	none := Bbox{math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)}
+	b := none
+	g.boxes = make([]Bbox, len(g.polys))
+	for i, poly := range g.polys {
+		pb := none
 		for _, r := range poly {
-			add(r)
+			pb = grow(pb, r)
 		}
+		g.boxes[i] = pb
+		b = b.Union(pb)
 	}
 	for _, l := range g.lines {
-		add(l)
+		b = grow(b, l)
 	}
-	add(g.points)
+	b = grow(b, g.points)
 	g.empty = math.IsInf(b.XMin, 1)
 	if !g.empty {
 		g.bbox = b
 	}
+}
+
+// grow extends the box to cover the x,y pairs in c.
+func grow(b Bbox, c []float64) Bbox {
+	for i := 0; i+1 < len(c); i += 2 {
+		b.XMin, b.XMax = math.Min(b.XMin, c[i]), math.Max(b.XMax, c[i])
+		b.YMin, b.YMax = math.Min(b.YMin, c[i+1]), math.Max(b.YMax, c[i+1])
+	}
+	return b
 }

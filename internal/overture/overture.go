@@ -315,7 +315,7 @@ func nameOf(f *cache.File, i int, chain Languages) (string, string) {
 // Served counts the names resolved so far by the language that served them.
 func (p *Provider) Served() map[string]int { return p.served }
 
-func (p *Provider) gather(f *cache.File, pt geocode.Point, chain Languages) ([]Candidate, error) {
+func (p *Provider) gather(f *cache.File, pt geocode.Point, chain Languages, bound float64) ([]Candidate, error) {
 	var out []Candidate
 	for _, i := range f.Candidates(pt.Lon, pt.Lat) {
 		r := f.Rows[i]
@@ -326,7 +326,7 @@ func (p *Provider) gather(f *cache.File, pt geocode.Point, chain Languages) ([]C
 		if err != nil {
 			return nil, err
 		}
-		c.Contains, c.Distance = g.Locate(pt.Lon, pt.Lat)
+		c.Contains, c.Distance = g.Locate(pt.Lon, pt.Lat, bound)
 		out = append(out, c)
 	}
 	return out, nil
@@ -483,7 +483,7 @@ type Explanation struct {
 
 // Resolve implements geocode.Resolver. The city fallback is geocode's job.
 func (p *Provider) Resolve(ctx context.Context, pt geocode.Point) (geocode.Result, error) {
-	e, err := p.compute(ctx, pt)
+	e, err := p.compute(ctx, pt, false)
 	if err != nil {
 		return geocode.Result{}, err
 	}
@@ -492,7 +492,7 @@ func (p *Provider) Resolve(ctx context.Context, pt geocode.Point) (geocode.Resul
 
 // Explain is Resolve with every candidate and decision.
 func (p *Provider) Explain(ctx context.Context, pt geocode.Point) (*Explanation, error) {
-	return p.compute(ctx, pt)
+	return p.compute(ctx, pt, true)
 }
 
 // profile returns the catalog profile with the provider's optional override.
@@ -508,7 +508,7 @@ func (p *Provider) Country(ctx context.Context, pt geocode.Point) (code, name st
 	if err != nil {
 		return "", "", false, err
 	}
-	cands, err := p.gather(w, pt, Languages{LanguageEnglish})
+	cands, err := p.gather(w, pt, Languages{LanguageEnglish}, geo.Tolerance)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -553,14 +553,22 @@ func inLists(subtype string, lists [][]string) bool {
 	return false
 }
 
-func (p *Provider) compute(ctx context.Context, pt geocode.Point) (*Explanation, error) {
+// compute bounds edge distances by the containment tolerance or division
+// fallback. exact disables these bounds for Explain.
+func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*Explanation, error) {
 	e := &Explanation{Point: pt, Releases: map[string]string{}}
+	measure := func(bound float64) float64 {
+		if exact {
+			return math.Inf(1)
+		}
+		return bound
+	}
 	w, err := p.World(ctx)
 	if err != nil {
 		return nil, err
 	}
 	e.Releases["world"] = w.Header.Release
-	e.Countries, err = p.gather(w, pt, Languages{LanguageEnglish})
+	e.Countries, err = p.gather(w, pt, Languages{LanguageEnglish}, measure(geo.Tolerance))
 	if err != nil {
 		return nil, err
 	}
@@ -578,11 +586,11 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point) (*Explanation,
 		return nil, err
 	}
 	e.Releases["divisions/"+e.Code] = d.Header.Release
-	e.Divisions, err = p.gather(d, pt, p.chain(d, e.Profile.Language))
+	bound := *e.Profile.FallbackDistance
+	e.Divisions, err = p.gather(d, pt, p.chain(d, e.Profile.Language), measure(bound))
 	if err != nil {
 		return nil, err
 	}
-	bound := *e.Profile.FallbackDistance
 	si := selectName(e.Divisions, e.Profile.StateSubtypes, false)
 	if si < 0 {
 		si = selectNearest(e.Divisions, e.Profile.StateSubtypes, bound)
@@ -610,7 +618,7 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point) (*Explanation,
 			return nil, err
 		}
 		e.Releases["airports"] = a.Header.Release
-		e.Airports, err = p.gather(a, pt, p.chain(a, e.Profile.Language))
+		e.Airports, err = p.gather(a, pt, p.chain(a, e.Profile.Language), measure(geo.Tolerance))
 		if err != nil {
 			return nil, err
 		}

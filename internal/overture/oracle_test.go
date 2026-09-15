@@ -69,7 +69,7 @@ func oracleCachePaths(dir string) []string {
 
 // Opt-in tests require complete, pinned caches. Cache-directory profiles are
 // never read. A nil Fetcher prevents all on-demand downloads.
-func oracleDataDir(t *testing.T) string {
+func oracleDataDir(t testing.TB) string {
 	t.Helper()
 	dir := oracleRoot(t)
 	checkRelease(t, oracleCachePaths(dir)...)
@@ -77,7 +77,7 @@ func oracleDataDir(t *testing.T) string {
 }
 
 // oracleRoot skips the test unless REVERSEGEO_DATA is set.
-func oracleRoot(t *testing.T) string {
+func oracleRoot(t testing.TB) string {
 	t.Helper()
 	dir := os.Getenv("REVERSEGEO_DATA")
 	if dir == "" {
@@ -90,7 +90,7 @@ func oracleRoot(t *testing.T) string {
 	return dir
 }
 
-func checkRelease(t *testing.T, paths ...string) {
+func checkRelease(t testing.TB, paths ...string) {
 	t.Helper()
 	for _, path := range paths {
 		f, err := cache.Open(path)
@@ -105,7 +105,7 @@ func checkRelease(t *testing.T, paths ...string) {
 	}
 }
 
-func openData(t *testing.T) *Provider {
+func openData(t testing.TB) *Provider {
 	t.Helper()
 	dir := oracleDataDir(t)
 	profiles, err := LoadProfiles(oracleProfilePath)
@@ -126,6 +126,14 @@ func checkNames(t *testing.T, p *Provider, samples []sample) {
 			got := res.WithFallback()
 			if !got.Found || got.City != s.city || got.State != s.state || got.Country != s.country {
 				t.Errorf("got %+v; want %q, %q, %q", got, s.city, s.state, s.country)
+			}
+			// Bounded and exact distances must give the same result.
+			e, err := p.Explain(context.Background(), s.pt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e.Result != res {
+				t.Errorf("explain %+v; resolve %+v", e.Result, res)
 			}
 		})
 	}

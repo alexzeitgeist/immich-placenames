@@ -480,3 +480,45 @@ func TestEmptyDivisionsFailsResolution(t *testing.T) {
 		t.Fatalf("fetched divisions %d times, want 1", f.divisions)
 	}
 }
+
+// Bounded lookup must preserve the result; Explain must keep exact distances.
+func TestResolveMatchesExplain(t *testing.T) {
+	fallback := 0.01
+	for _, c := range []struct {
+		at   geocode.Point
+		city string
+	}{
+		{geocode.Point{}, "Test City"},
+		{geocode.Point{Lon: 0.005}, "Test City"},
+		{geocode.Point{Lon: 0.5}, ""},
+	} {
+		t.Run(fmt.Sprintf("city at %g", c.at.Lon), func(t *testing.T) {
+			dir := t.TempDir()
+			writeCache(t, WorldPath(dir), cache.Row{ID: "c", Country: "CH", Name: "Switzerland", Subtype: "country", Bbox: unitBox})
+			// Keep the city in the bbox candidates while moving its geometry.
+			writeCacheAt(t, DivisionsPath(dir, "CH"), c.at,
+				cache.Row{ID: "l", Country: "CH", Name: "Test City", Subtype: "locality", Bbox: unitBox})
+			profiles, err := LoadProfiles("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := New(dir, profiles, nil, nil)
+			defer p.Close()
+			p.Overrides.Airports, p.Overrides.FallbackDistance = boolp(false), &fallback
+			res, err := p.Resolve(context.Background(), geocode.Point{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e, err := p.Explain(context.Background(), geocode.Point{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.City != c.city || e.Result != res {
+				t.Errorf("resolve %+v, explain %+v; want city %q", res, e.Result, c.city)
+			}
+			if d := e.Divisions[0].Distance; math.Abs(d-c.at.Lon) > 1e-9 {
+				t.Errorf("explain distance %g, want %g", d, c.at.Lon)
+			}
+		})
+	}
+}
