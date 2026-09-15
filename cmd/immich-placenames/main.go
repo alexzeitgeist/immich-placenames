@@ -42,8 +42,8 @@ type command struct {
 
 // Flags precede operands, as the standard parser reads them.
 var commands = []command{
-	{"fetch", "[-data DIR] [-workers N] [-release R] world | airports | CC...", false, (*app).fetch},
-	{"lookup", "[-data DIR] [-profiles FILE] [-workers N] [-json] [-airports=BOOL] [-fallback-distance N] LAT LON", false, (*app).lookup},
+	{"fetch", "[-data DIR] [-workers N] [-release R] [-areas=BOOL] [-points] world | airports | CC...", false, (*app).fetch},
+	{"lookup", "[-data DIR] [-profiles FILE] [-workers N] [-json] [-airports=BOOL] [-fallback-distance N] [-points=BOOL] [-point-distance N] LAT LON", false, (*app).lookup},
 	{"run", "[-data DIR] [-profiles FILE] [-workers N] [-dry-run] [-all] [-lock] [-limit N] [-page-size N]", true, (*app).run},
 	{"status", "[-data DIR] [-profiles FILE]", true, (*app).status},
 	{"reset", "[-dry-run] -all | -ids FILE | -city V | -state V | -country V", true, (*app).reset},
@@ -295,6 +295,15 @@ func (f *fetcher) Divisions(ctx context.Context, code string, box geo.Bbox, dest
 	return err
 }
 
+func (f *fetcher) Points(ctx context.Context, code string, box geo.Bbox, dest string) error {
+	r, err := f.Release(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = f.c.Points(ctx, r, code, box, dest)
+	return err
+}
+
 func (f *fetcher) Airports(ctx context.Context, dest string) error {
 	r, err := f.Release(ctx)
 	if err != nil {
@@ -310,12 +319,17 @@ func (a *app) fetch(ctx context.Context, fs *flag.FlagSet, args []string) error 
 	a.dataFlag(fs)
 	a.workersFlag(fs)
 	release := fs.String("release", "latest", "Overture release")
+	areas := fs.Bool("areas", true, "fetch the division areas of the listed countries")
+	points := fs.Bool("points", false, "also fetch their division points")
 	if err := a.parse(fs, args); err != nil {
 		return err
 	}
 	world, airports, codes, err := fetchTargets(fs.Args())
 	if err != nil {
 		return usagef(fs, "%v", err)
+	}
+	if len(codes) > 0 && !*areas && !*points {
+		return usagef(fs, "fetch: -areas=false leaves nothing to fetch for %s without -points", strings.Join(codes, ", "))
 	}
 	f := a.fetcher(*release)
 	p := overture.New(a.data, nil, f, a.log)
@@ -332,8 +346,15 @@ func (a *app) fetch(ctx context.Context, fs *flag.FlagSet, args []string) error 
 		}
 	}
 	for i, code := range codes {
-		if err := f.Divisions(ctx, code, boxes[i], overture.DivisionsPath(a.data, code)); err != nil {
-			return err
+		if *areas {
+			if err := f.Divisions(ctx, code, boxes[i], overture.DivisionsPath(a.data, code)); err != nil {
+				return err
+			}
+		}
+		if *points {
+			if err := f.Points(ctx, code, boxes[i], overture.PointsPath(a.data, code)); err != nil {
+				return err
+			}
 		}
 	}
 	if airports {
@@ -374,6 +395,8 @@ func (a *app) lookup(ctx context.Context, fs *flag.FlagSet, args []string) error
 	// settings out of PrintDefaults.
 	airports := fs.Bool("airports", false, "airport matching override; omitted inherits the profile")
 	distance := fs.Float64("fallback-distance", 0, "nearest-division bound in degrees; 0 disables, omitted inherits the profile")
+	points := fs.Bool("points", false, "division-point fallback override; omitted inherits the profile")
+	pointDistance := fs.Float64("point-distance", 0, "division-point bound in metres; 0 disables, omitted inherits the profile")
 	// Keep the final two arguments out of flag parsing to allow negative coordinates.
 	// With fewer arguments, parse still handles -h.
 	flags, coords := args, []string(nil)
@@ -385,6 +408,9 @@ func (a *app) lookup(ctx context.Context, fs *flag.FlagSet, args []string) error
 	}
 	if *distance < 0 || math.IsNaN(*distance) || math.IsInf(*distance, 0) {
 		return usagef(fs, "-fallback-distance must be finite and non-negative")
+	}
+	if *pointDistance < 0 || math.IsNaN(*pointDistance) || math.IsInf(*pointDistance, 0) {
+		return usagef(fs, "-point-distance must be finite and non-negative")
 	}
 	if coords == nil || fs.NArg() != 0 {
 		return usagef(fs, "lookup: LAT LON must be the last two arguments")
@@ -409,6 +435,10 @@ func (a *app) lookup(ctx context.Context, fs *flag.FlagSet, args []string) error
 			p.Overrides.Airports = airports
 		case "fallback-distance":
 			p.Overrides.FallbackDistance = distance
+		case "points":
+			p.Overrides.PointFallback = points
+		case "point-distance":
+			p.Overrides.PointDistance = pointDistance
 		}
 	})
 	e, err := p.Explain(ctx, pt)
@@ -441,7 +471,7 @@ func printExplanation(out io.Writer, e *overture.Explanation, final geocode.Resu
 	fmt.Fprintf(w, "point %.7f %.7f\n", e.Point.Lat, e.Point.Lon)
 	fmt.Fprintf(w, "world.geo %s: %d bbox candidates\n", e.Releases["world"], len(e.Countries))
 	for _, c := range e.Countries {
-		printCandidate(w, c)
+		printCandidate(w, c, false)
 	}
 	if e.Code == "" {
 		fmt.Fprintln(w, "result: no country")
@@ -449,26 +479,38 @@ func printExplanation(out io.Writer, e *overture.Explanation, final geocode.Resu
 	}
 	fmt.Fprintf(w, "divisions/%s.geo %s: profile %s; %d bbox candidates\n", e.Code, e.Releases["divisions/"+e.Code], e.Profile, len(e.Divisions))
 	for _, c := range e.Divisions {
-		printCandidate(w, c)
+		printCandidate(w, c, false)
+	}
+	if r, ok := e.Releases["points/"+e.Code]; ok {
+		fmt.Fprintf(w, "points/%s.geo %s: %d label candidates\n", e.Code, r, len(e.Points))
+		for _, c := range e.Points {
+			printCandidate(w, c, true)
+		}
 	}
 	if r, ok := e.Releases["airports"]; ok {
 		fmt.Fprintf(w, "airports.geo %s: %d bbox candidates\n", r, len(e.Airports))
 		for _, c := range e.Airports {
-			printCandidate(w, c)
+			printCandidate(w, c, false)
 		}
 	} else {
 		fmt.Fprintln(w, "airports off")
 	}
 	fmt.Fprintf(w, "state: %s\ncity: %s\nairport: %s\n", or(e.State, "-"), or(e.City, "-"), or(e.Airport, "-"))
+	if e.Overridden != "" {
+		fmt.Fprintf(w, "override: %s to %s\n", e.Overridden, or(e.Result.City, "-"))
+	}
 	fmt.Fprintf(w, "result: %s, %s, %s\n", final.City, final.State, final.Country)
 }
 
-// printCandidate prints one line per candidate: area in 1e-4 square degrees,
-// edge distance in degrees when not contained, the name with its language.
-func printCandidate(w io.Writer, c overture.Candidate) {
+// printCandidate prints area in 1e-4 square degrees, distance and name language.
+// Label distances use metres; area distances use degrees.
+func printCandidate(w io.Writer, c overture.Candidate, label bool) {
 	in := "bbox"
-	if c.Contains {
+	switch {
+	case c.Contains:
 		in = "IN  "
+	case label:
+		in = "near"
 	}
 	lvl := "-"
 	if c.AdminLevel >= 0 {
@@ -479,7 +521,10 @@ func printCandidate(w io.Writer, c overture.Candidate) {
 		terr = "T"
 	}
 	dist := strings.Repeat(" ", 12)
-	if !c.Contains {
+	switch {
+	case label:
+		dist = fmt.Sprintf("dist=%6.0fm", c.Metres)
+	case !c.Contains:
 		dist = fmt.Sprintf("dist=%.5f", c.Distance)
 	}
 	fmt.Fprintf(w, "  %s %-12s %-22s lvl=%-2s %s area=%9.2f %s  %-40s %s\n", in, c.Subtype, c.Class, lvl, terr, c.Area()*1e4, dist, c.Name+" ("+c.Language+")", c.Decision)
@@ -548,7 +593,8 @@ func (a *app) run(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		message = "pass stopped"
 	}
 	a.log.Info(message, "selected", report.Selected, "written", report.Written, "reported", report.Reported,
-		"no_country", report.NoCountry, "changed", report.Changed, "errors", report.Failed, "committed_pages", report.CommittedPages)
+		"no_country", report.NoCountry, "changed", report.Changed, "overridden", p.Overridden(),
+		"errors", report.Failed, "committed_pages", report.CommittedPages)
 	if runErr != nil {
 		if opts.DryRun {
 			return fmt.Errorf("dry-run stopped: %w", runErr)
@@ -669,9 +715,11 @@ func (a *app) status(ctx context.Context, fs *flag.FlagSet, args []string) error
 // printCaches lists every cache file under dir, then stale temporary files.
 func printCaches(out io.Writer, dir string) {
 	paths := []string{overture.WorldPath(dir), overture.AirportsPath(dir)}
-	m, _ := filepath.Glob(filepath.Join(dir, "divisions", "*.geo"))
-	sort.Strings(m)
-	paths = append(paths, m...)
+	for _, sub := range []string{"divisions", "points"} {
+		m, _ := filepath.Glob(filepath.Join(dir, sub, "*.geo"))
+		sort.Strings(m)
+		paths = append(paths, m...)
+	}
 	for _, path := range paths {
 		rel, _ := filepath.Rel(dir, path)
 		f, err := cache.Open(path)

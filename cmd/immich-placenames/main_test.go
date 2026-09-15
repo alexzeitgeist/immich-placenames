@@ -97,6 +97,21 @@ func writeWorld(t *testing.T, dir string, hdr cache.Header) {
 	}
 }
 
+func writePoints(t *testing.T, dir, code string, hdr cache.Header) {
+	t.Helper()
+	w, err := cache.NewWriter(overture.PointsPath(dir, code), hdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Add(cache.Row{ID: "l", Country: code, Name: "Label", Subtype: "locality"}, []byte{0}); err != nil {
+		w.Abort()
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func quiet(dir string) *app {
 	return &app{data: dir, workers: 4, log: slog.New(slog.NewTextHandler(io.Discard, nil)), out: io.Discard, errOut: io.Discard}
 }
@@ -179,7 +194,7 @@ func TestOperandsRejected(t *testing.T) {
 		{"run", "extra"}, {"reset", "-all", "extra"}, {"status", "extra"}, {"version", "extra"},
 		{"lookup", "1"}, {"lookup", "42", "18", "-json"},
 		{"reset"}, {"reset", "-all", "-city", "X"},
-		{"fetch"}, {"fetch", "-airports", "HR"}, {"fetch", "HRV"},
+		{"fetch"}, {"fetch", "-airports", "HR"}, {"fetch", "HRV"}, {"fetch", "-areas=false", "HR"},
 	} {
 		if err := a.call(args...); !isUsage(err) {
 			t.Errorf("%v: %v", args, err)
@@ -233,12 +248,14 @@ func TestInvalidInputRejected(t *testing.T) {
 func TestStatusOptions(t *testing.T) {
 	dir := t.TempDir()
 	writeWorld(t, dir, cache.Header{Kind: "world", Release: "2026-01-01.0"})
+	writePoints(t, dir, "CH", cache.Header{Kind: "points", Code: "CH", Release: "2026-01-01.0"})
 	t.Setenv("DB_USERNAME", "")
 	var out strings.Builder
 	a := quiet("data")
 	a.out = &out
 	err := a.call("status", "-data", dir)
-	if err == nil || !strings.Contains(err.Error(), "DB_USERNAME") || !strings.Contains(out.String(), "world.geo          release 2026-01-01.0 rows 1") || !strings.Contains(out.String(), "names en without dependency territories") || !strings.Contains(out.String(), "\nprofiles bundled\n  default  [locality borough localadmin macrohood neighborhood microhood] smallest-area state=[region macroregion county macrocounty dependency] fallback=0.01") || !strings.Contains(out.String(), "\n  DE       [county") {
+	if err == nil || !strings.Contains(err.Error(), "DB_USERNAME") || !strings.Contains(out.String(), "world.geo          release 2026-01-01.0 rows 1") ||
+		!strings.Contains(out.String(), "points/CH.geo      release 2026-01-01.0 rows 1") || !strings.Contains(out.String(), "names en without dependency territories") || !strings.Contains(out.String(), "\nprofiles bundled\n  default  [locality borough localadmin macrohood neighborhood microhood] smallest-area state=[region macroregion county macrocounty dependency] fallback=0.01") || !strings.Contains(out.String(), "\n  DE       [county") {
 		t.Errorf("status -data: %v; printed %q", err, out.String())
 	}
 }

@@ -233,3 +233,51 @@ func TestHeaderDependencies(t *testing.T) {
 		f.Close()
 	}
 }
+
+func TestNear(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "divisions", "HR.geo")
+	write(t, dest)
+	c, err := Open(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	for _, tc := range []struct {
+		lon, lat, d float64
+		want        []int
+	}{
+		{lon: 2, lat: 3, d: 0, want: []int{0}},
+		{lon: 0, lat: 3, d: 0.9},
+		{lon: 0, lat: 3, d: 1, want: []int{0}},
+		{lon: 5, lat: 5, d: 10, want: []int{0, 1}},
+	} {
+		if got := c.Near(tc.lon, tc.lat, tc.d); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("Near(%g, %g, %g) = %v, want %v", tc.lon, tc.lat, tc.d, got, tc.want)
+		}
+	}
+}
+
+func TestNearWrappedSquare(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		lon, lat, d float64
+		box         geo.Bbox
+		want        []int
+	}{
+		{"east wrap", 179.999, -16, 0.005, geo.Bbox{XMin: -179.999, XMax: -179.999, YMin: -16, YMax: -16}, []int{0}},
+		{"west wrap", -179.999, -16, 0.005, geo.Bbox{XMin: 179.999, XMax: 179.999, YMin: -16, YMax: -16}, []int{0}},
+		{"square corner", 0, 0, 1, geo.Bbox{XMin: 0.9, XMax: 0.9, YMin: 0.9, YMax: 0.9}, []int{0}},
+		{"opposite dateline endpoints", 180, 0, 0, geo.Bbox{XMin: -180, XMax: -180}, []int{0}},
+		{"latitude outside", 179.999, -16, 0.005, geo.Bbox{XMin: -179.999, XMax: -179.999, YMin: -15, YMax: -15}, nil},
+		{"longitude outside", 179.999, -16, 0.005, geo.Bbox{XMin: -179.9, XMax: -179.9, YMin: -16, YMax: -16}, nil},
+		{"all longitudes", 170, 90, 180, geo.Bbox{XMin: -170, XMax: -170, YMin: 89, YMax: 89}, []int{0}},
+		{"no duplicate rows", 180, 0, 180, geo.Bbox{XMin: -180, XMax: 180, YMin: -90, YMax: 90}, []int{0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &File{Rows: []Row{{Bbox: tc.box}}}
+			if got := c.Near(tc.lon, tc.lat, tc.d); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Near(%g, %g, %g) = %v, want %v", tc.lon, tc.lat, tc.d, got, tc.want)
+			}
+		})
+	}
+}

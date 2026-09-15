@@ -266,6 +266,23 @@ func (c *File) Candidates(lon, lat float64) []int {
 	return out
 }
 
+// Near returns rows whose bbox intersects a square of half-width d degrees
+// around the point, wrapping longitude. Callers must check geometry distances.
+func (c *File) Near(lon, lat, d float64) []int {
+	var out []int
+	box := geo.Bbox{XMin: lon - d, YMin: lat - d, XMax: lon + d, YMax: lat + d}
+	west, east := box, box
+	west.XMin, west.XMax = box.XMin-360, box.XMax-360
+	east.XMin, east.XMax = box.XMin+360, box.XMax+360
+	for i := range c.Rows {
+		b := c.Rows[i].Bbox
+		if b.Intersects(box) || b.Intersects(west) || b.Intersects(east) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
 // Geometry decodes row i's blob on first use and keeps it.
 func (c *File) Geometry(i int) (*geo.Geometry, error) {
 	c.mu.Lock()

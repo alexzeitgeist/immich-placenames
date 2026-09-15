@@ -1,5 +1,5 @@
 // Package overture resolves country, state and city from cached Overture
-// polygons, with optional airport names in place of the city.
+// polygons, with optional airport names and nearby place labels.
 package overture
 
 import (
@@ -34,6 +34,7 @@ type Fetcher interface {
 	// World uses the fetcher's default release when release is empty.
 	World(ctx context.Context, release, dest string) error
 	Divisions(ctx context.Context, code string, box geo.Bbox, dest string) error
+	Points(ctx context.Context, code string, box geo.Bbox, dest string) error
 	Airports(ctx context.Context, dest string) error
 }
 
@@ -41,6 +42,7 @@ type Fetcher interface {
 func WorldPath(dir string) string           { return filepath.Join(dir, "world.geo") }
 func AirportsPath(dir string) string        { return filepath.Join(dir, "airports.geo") }
 func DivisionsPath(dir, code string) string { return filepath.Join(dir, "divisions", code+".geo") }
+func PointsPath(dir, code string) string    { return filepath.Join(dir, "points", code+".geo") }
 
 // Provider resolves points; not safe for concurrent use.
 type Provider struct {
@@ -52,14 +54,17 @@ type Provider struct {
 	// Its zero-valued fields inherit the effective catalog profile.
 	Overrides Profile
 
-	world    *cache.File
-	worldErr error
-	div      map[string]*cache.File
-	divErr   map[string]error
-	air      *cache.File
-	airErr   error
-	reported map[string]bool // cache shortfalls already logged
-	served   map[string]int  // names written, by the language that served them
+	world      *cache.File
+	worldErr   error
+	div        map[string]*cache.File
+	divErr     map[string]error
+	point      map[string]*cache.File
+	pointErr   map[string]error
+	air        *cache.File
+	airErr     error
+	reported   map[string]bool // cache shortfalls already logged
+	served     map[string]int  // names written, by the language that served them
+	overridden int             // cities rewritten by a profile
 }
 
 // New returns a provider over dir; profiles may be nil when it only fetches.
@@ -68,7 +73,8 @@ func New(dir string, profiles *Profiles, fetch Fetcher, log *slog.Logger) *Provi
 		log = slog.Default()
 	}
 	return &Provider{Dir: dir, Profiles: profiles, Fetch: fetch, Log: log,
-		div: map[string]*cache.File{}, divErr: map[string]error{}, reported: map[string]bool{}, served: map[string]int{}}
+		div: map[string]*cache.File{}, divErr: map[string]error{}, point: map[string]*cache.File{}, pointErr: map[string]error{},
+		reported: map[string]bool{}, served: map[string]int{}}
 }
 
 // open logs invalid cache files and treats them as absent.
@@ -153,6 +159,35 @@ func (p *Provider) Divisions(ctx context.Context, code string) (*cache.File, err
 	return f, nil
 }
 
+// Points opens a country's division points, fetching them when absent. A
+// failure is remembered for the process.
+func (p *Provider) Points(ctx context.Context, code string) (*cache.File, error) {
+	if f := p.point[code]; f != nil {
+		return f, nil
+	}
+	if err := p.pointErr[code]; err != nil {
+		return nil, err
+	}
+	path := PointsPath(p.Dir, code)
+	f, err := p.open(path)
+	if errors.Is(err, fs.ErrNotExist) && p.Fetch != nil {
+		var box geo.Bbox
+		box, err = p.CountryBbox(ctx, code)
+		if err == nil {
+			p.Log.Info("fetching division points", "country", code, "path", path)
+			if err = p.Fetch.Points(ctx, code, box, path); err == nil {
+				f, err = p.open(path)
+			}
+		}
+	}
+	if err != nil {
+		p.pointErr[code] = fmt.Errorf("points %s: %w", code, err)
+		return nil, p.pointErr[code]
+	}
+	p.point[code] = f
+	return f, nil
+}
+
 // Airports opens the airports, fetching them when absent. A failure is
 // remembered for the process.
 func (p *Provider) Airports(ctx context.Context) (*cache.File, error) {
@@ -211,6 +246,9 @@ func (p *Provider) Releases() map[string]string {
 	for c, f := range p.div {
 		out["divisions/"+c] = f.Header.Release
 	}
+	for c, f := range p.point {
+		out["points/"+c] = f.Header.Release
+	}
 	if p.air != nil {
 		out["airports"] = p.air.Header.Release
 	}
@@ -223,6 +261,9 @@ func (p *Provider) Close() {
 		p.world.Close()
 	}
 	for _, f := range p.div {
+		f.Close()
+	}
+	for _, f := range p.point {
 		f.Close()
 	}
 	if p.air != nil {
@@ -243,9 +284,11 @@ type Candidate struct {
 	Territorial bool     `json:"territorial"`
 	Bbox        geo.Bbox `json:"bbox"`
 	Contains    bool     `json:"contains"`
-	Distance    float64  `json:"distance"` // planar degrees to the geometry, 0 when contained
+	Distance    float64  `json:"distance"`         // planar degrees for areas; 0 when contained or a division point
+	Metres      float64  `json:"metres,omitempty"` // great-circle metres, division points only
 	Decision    string   `json:"decision"`
 	row         int
+	lon, lat    float64 // the label point, division points only
 }
 
 // Area is the bounding-box area used to break ranking ties.
@@ -315,6 +358,9 @@ func nameOf(f *cache.File, i int, chain Languages) (string, string) {
 // Served counts the names resolved so far by the language that served them.
 func (p *Provider) Served() map[string]int { return p.served }
 
+// Overridden returns the number of city overrides applied.
+func (p *Provider) Overridden() int { return p.overridden }
+
 func (p *Provider) gather(f *cache.File, pt geocode.Point, chain Languages, bound float64) ([]Candidate, error) {
 	var out []Candidate
 	for _, i := range f.Candidates(pt.Lon, pt.Lat) {
@@ -327,6 +373,30 @@ func (p *Provider) gather(f *cache.File, pt geocode.Point, chain Languages, boun
 			return nil, err
 		}
 		c.Contains, c.Distance = g.Locate(pt.Lon, pt.Lat, bound)
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// gatherPoints collects labels within window degrees of pt on each axis,
+// wrapping longitude. It skips empty geometries and measures distance in metres.
+func (p *Provider) gatherPoints(f *cache.File, pt geocode.Point, chain Languages, window float64) ([]Candidate, error) {
+	var out []Candidate
+	for _, i := range f.Near(pt.Lon, pt.Lat, window) {
+		r := f.Rows[i]
+		c := Candidate{ID: r.ID, Subtype: r.Subtype, Class: r.Class, Country: r.Country,
+			AdminLevel: r.AdminLevel, Territorial: r.Territorial, Bbox: r.Bbox, row: i}
+		c.Name, c.Language = nameOf(f, i, chain)
+		g, err := f.Geometry(i)
+		if err != nil {
+			return nil, err
+		}
+		// Use planar distance only to detect empty geometry; labels use Metres.
+		if math.IsInf(g.Distance(pt.Lon, pt.Lat), 1) {
+			continue
+		}
+		c.lon, c.lat = g.Bbox().Center()
+		c.Metres = geo.Haversine(pt.Lat, pt.Lon, c.lat, c.lon)
 		out = append(out, c)
 	}
 	return out, nil
@@ -430,6 +500,54 @@ func selectNearest(cands []Candidate, list []string, bound float64) int {
 	return best
 }
 
+// pointBefore ranks division points: subtype order, distance, then id.
+func pointBefore(a, b Candidate, list []string) bool {
+	if ia, ib := subtypeIndex(list, a.Subtype), subtypeIndex(list, b.Subtype); ia != ib {
+		return ia < ib
+	}
+	if a.Metres != b.Metres {
+		return a.Metres < b.Metres
+	}
+	return a.ID < b.ID
+}
+
+// selectPoint ranks eligible labels within metres. A non-empty Decision
+// marks a label rejected by the administrative guard.
+func selectPoint(cands []Candidate, list []string, metres float64) int {
+	best := -1
+	for i, c := range cands {
+		if c.Decision != "" || c.Metres > metres || subtypeIndex(list, c.Subtype) < 0 {
+			continue
+		}
+		if best < 0 || pointBefore(c, cands[best], list) {
+			best = i
+		}
+	}
+	return best
+}
+
+func guardBefore(a, b Candidate) bool {
+	if a.Area() != b.Area() {
+		return a.Area() < b.Area()
+	}
+	return a.ID < b.ID
+}
+
+// guardArea returns the containing state division with the smallest bbox,
+// or -1 if none contains the query point.
+func guardArea(cands []Candidate, list []string) int {
+	best := -1
+	for i, c := range cands {
+		if !c.Contains || subtypeIndex(list, c.Subtype) < 0 {
+			continue
+		}
+		if best < 0 || guardBefore(c, cands[best]) {
+			best = i
+		}
+	}
+	return best
+}
+
 func airportRankOf(c Candidate) int {
 	if !strings.EqualFold(c.Subtype, "airport") {
 		return 100
@@ -468,17 +586,19 @@ func selectAirport(cands []Candidate, pt geocode.Point) int {
 
 // Explanation is the full calculation behind one result.
 type Explanation struct {
-	Point     geocode.Point     `json:"point"`
-	Countries []Candidate       `json:"countries"`
-	Code      string            `json:"code"`
-	Profile   Profile           `json:"profile"`
-	Divisions []Candidate       `json:"divisions"`
-	Airports  []Candidate       `json:"airports"`
-	State     string            `json:"state"`
-	City      string            `json:"city"`
-	Airport   string            `json:"airport"`
-	Result    geocode.Result    `json:"result"`
-	Releases  map[string]string `json:"releases"`
+	Point      geocode.Point     `json:"point"`
+	Countries  []Candidate       `json:"countries"`
+	Code       string            `json:"code"`
+	Profile    Profile           `json:"profile"`
+	Divisions  []Candidate       `json:"divisions"`
+	Points     []Candidate       `json:"points"`
+	Airports   []Candidate       `json:"airports"`
+	State      string            `json:"state"`
+	City       string            `json:"city"`
+	Airport    string            `json:"airport"`
+	Overridden string            `json:"overridden,omitempty"` // the city name a profile rewrote
+	Result     geocode.Result    `json:"result"`
+	Releases   map[string]string `json:"releases"`
 }
 
 // Resolve implements geocode.Resolver. The city fallback is geocode's job.
@@ -544,6 +664,24 @@ func decide(cands []Candidate, winner int, role string, lists ...[]string) {
 	}
 }
 
+// decidePoints labels the point candidates the guard left undecided.
+func decidePoints(cands []Candidate, winner int, list []string, metres float64) {
+	for i := range cands {
+		c := &cands[i]
+		switch {
+		case c.Decision != "":
+		case i == winner:
+			c.Decision = "city, point"
+		case c.Metres > metres:
+			c.Decision = "beyond the distance"
+		case subtypeIndex(list, c.Subtype) < 0:
+			c.Decision = "subtype not selectable"
+		default:
+			c.Decision = "outranked"
+		}
+	}
+}
+
 func inLists(subtype string, lists [][]string) bool {
 	for _, l := range lists {
 		if subtypeIndex(l, subtype) >= 0 {
@@ -551,6 +689,39 @@ func inLists(subtype string, lists [][]string) bool {
 		}
 	}
 	return false
+}
+
+// points selects a label within the distance limit and administrative guard.
+// Explain doubles the search distance to include nearby rejected labels.
+func (p *Provider) points(ctx context.Context, e *Explanation, pt geocode.Point, d *cache.File, exact bool) (int, error) {
+	f, err := p.Points(ctx, e.Code)
+	if err != nil {
+		return -1, err
+	}
+	e.Releases["points/"+e.Code] = f.Header.Release
+	metres := *e.Profile.PointDistance
+	searchMetres := metres
+	if exact {
+		searchMetres *= 2
+	}
+	window := geo.Window(pt.Lat, searchMetres)
+	if e.Points, err = p.gatherPoints(f, pt, p.chain(f, e.Profile.Language), window); err != nil {
+		return -1, err
+	}
+	if gi := guardArea(e.Divisions, e.Profile.StateSubtypes); gi >= 0 {
+		g, err := d.Geometry(e.Divisions[gi].row)
+		if err != nil {
+			return -1, err
+		}
+		for i := range e.Points {
+			if e.Points[i].Metres <= metres && !g.Contains(e.Points[i].lon, e.Points[i].lat) {
+				e.Points[i].Decision = "outside " + e.Divisions[gi].Name
+			}
+		}
+	}
+	i := selectPoint(e.Points, e.Profile.PreferredSubtypes, metres)
+	decidePoints(e.Points, i, e.Profile.PreferredSubtypes, metres)
+	return i, nil
 }
 
 // compute bounds edge distances by the containment tolerance or division
@@ -612,6 +783,15 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 		}
 	}
 	decide(e.Divisions, -1, "", e.Profile.StateSubtypes, e.Profile.PreferredSubtypes)
+	pointI := -1
+	if cityI < 0 && *e.Profile.PointFallback && *e.Profile.PointDistance > 0 {
+		if pointI, err = p.points(ctx, e, pt, d, exact); err != nil {
+			return nil, err
+		}
+		if pointI >= 0 {
+			e.City = e.Points[pointI].Name
+		}
+	}
 	if *e.Profile.Airports {
 		a, err := p.Airports(ctx)
 		if err != nil {
@@ -625,15 +805,21 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 		ai := selectAirport(e.Airports, pt)
 		if ai >= 0 {
 			e.Airport = e.Airports[ai].Name
-			if cityI >= 0 {
+			switch {
+			case cityI >= 0:
 				e.Divisions[cityI].Decision += ", replaced by airport"
+			case pointI >= 0:
+				e.Points[pointI].Decision += ", replaced by airport"
 			}
 		}
 		decide(e.Airports, ai, "airport")
 	}
 	city, cityLang := e.City, ""
-	if cityI >= 0 {
+	switch {
+	case cityI >= 0:
 		cityLang = e.Divisions[cityI].Language
+	case pointI >= 0:
+		cityLang = e.Points[pointI].Language
 	}
 	if e.Airport != "" {
 		city = e.Airport
@@ -642,6 +828,11 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 				cityLang = c.Language
 			}
 		}
+	}
+	// City overrides apply after airport replacement.
+	if i := e.Profile.Override(city, e.State); i >= 0 {
+		e.Overridden, city = city, e.Profile.CityOverrides[i].To
+		p.overridden++
 	}
 	p.served[country.Language]++
 	if si >= 0 {

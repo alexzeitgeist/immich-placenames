@@ -156,6 +156,11 @@ func TestHaversine(t *testing.T) {
 	if d := Haversine(0, 0, 0, 1); math.Abs(d-111195) > 10 {
 		t.Errorf("one degree at the equator: %f", d)
 	}
+	for _, lat := range []float64{0, 0.015, -0.015, 45, 89.001, -89.001} {
+		if d := Haversine(lat, 0, -lat, 180); math.IsNaN(d) || math.Abs(d-math.Pi*earthRadius) > 1 {
+			t.Errorf("antipodes at latitude %g: distance %g, want %g", lat, d, math.Pi*earthRadius)
+		}
+	}
 }
 
 // near compares distances, +Inf included.
@@ -274,5 +279,38 @@ func TestBoundedLocateSkipsDistantPolygons(t *testing.T) {
 	slices.Sort(ratios)
 	if ratio := ratios[len(ratios)/2]; ratio < 20 {
 		t.Errorf("exact distance / bounded locate median ratio %.1fx, want at least 20x: the polygon boxes are not skipping enough work", ratio)
+	}
+}
+
+// Check every bearing; the largest longitude offset is poleward of the centre.
+func TestWindowCoversTheDistance(t *testing.T) {
+	for _, lat := range []float64{-90, -89.999, -89, -80, -60, -45, 0, 45, 60, 80, 89, 89.999, 90} {
+		for _, m := range []float64{0, 100, 500, 2000, 100000, 2000000, math.Pi * earthRadius, 1e300} {
+			w := Window(lat, m)
+			if math.IsNaN(w) || w < 0 || w > 180 {
+				t.Fatalf("lat %g, %g m: invalid window %g", lat, m, w)
+			}
+			phi := lat * math.Pi / 180
+			a := math.Min(m/earthRadius, math.Pi)
+			for bearing := 0; bearing < 360; bearing++ {
+				b := float64(bearing) * math.Pi / 180
+				sinLat := math.Sin(phi)*math.Cos(a) + math.Cos(phi)*math.Sin(a)*math.Cos(b)
+				destLat := math.Asin(math.Max(-1, math.Min(1, sinLat)))
+				destLon := math.Atan2(math.Sin(b)*math.Sin(a)*math.Cos(phi), math.Cos(a)-math.Sin(phi)*math.Sin(destLat))
+				dy := math.Abs(destLat*180/math.Pi - lat)
+				dx := math.Abs(destLon * 180 / math.Pi)
+				if dx > w || dy > w {
+					t.Fatalf("lat %g, %g m, bearing %d: offsets (%g, %g) outside square %g", lat, m, bearing, dx, dy, w)
+				}
+			}
+		}
+	}
+	if got := Window(0, Haversine(0, 0, 0, 1)); math.Abs(got-1) > 2e-9 {
+		t.Errorf("one degree at the equator: %g", got)
+	}
+	for _, lat := range []float64{-90, -89.999, 89.999, 90} {
+		if got := Window(lat, 500); got != 180 {
+			t.Errorf("circle reaching pole at %g: %g", lat, got)
+		}
 	}
 }

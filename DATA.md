@@ -6,11 +6,14 @@ immich-placenames downloads geographic boundaries from Overture Maps and caches 
 |---|---|---|
 | `world.geo` | Divisions / division_area, subtypes country and dependency | Country and its two-letter code |
 | `divisions/CC.geo` | Divisions / division_area, filtered by country | State and city |
+| `points/CC.geo` | Divisions / division, filtered by country | City when no division area supplies a city name |
 | `airports.geo` | Base / infrastructure, subtype airport | Airport name in place of the city |
 
 `world.geo` includes 53 dependency territories, such as Hong Kong, Greenland and Réunion, under their own country codes.
 
 World and country caches include boundaries on land and at sea. These can provide names for photos taken off the coast, outside the land boundary.
+
+Point caches hold Overture's place labels, including places without boundaries. The resolver downloads them when needed if [point fallback](HOWTO.md#places-without-a-boundary) is enabled. You can also download them with `fetch -points`.
 
 The airport cache covers the whole world. Overture's infrastructure records have no country field, and filtering by a country's bounding box can still cover most of the globe. We keep one airport cache to avoid storing the same airports in several country caches.
 
@@ -18,13 +21,16 @@ Use [profiles](HOWTO.md#profiles) to choose boundary types and the order of pref
 
 ## Download costs
 
-Measured with release `2026-08-19.0` and four workers. World and US used different machines; airports used a VM. Transfer, time and memory vary by setup and retries.
+Measured with release `2026-08-19.0` and four workers. World, US divisions and US division points used different machines; airports used a VM. Transfer, time and memory vary by setup and retries.
 
 | Fetch | Rows kept | Cache size | Data read | Time | Peak RSS |
 |---|---|---|---|---|---|
 | World | 483 | 168 MB | 1,771 MB | 1m50s | 711 MB |
 | Airports | 46,064 | 24 MB | 13,371 MB | 22m24s | 541 MB |
 | US divisions | 59,770 | 236 MB | 356 MB | 26s | 288 MB |
+| US division points | 206,523 | 30 MB | 48 MB | 19s | 301 MB |
+
+In this release, division points occupy one Parquet file with geographically clustered row groups. The fetcher skips groups outside the country's bounding box. US points required 48 MB of reads, compared with 356 MB for US boundaries.
 
 The download can be much larger than the cache. Overture stores the data in Parquet files, which the tool reads in chunks using HTTP range requests. It reads metadata and selected row groups, then keeps only the matching records. Airport records are scattered through the infrastructure dataset, so building a 24 MB cache required about 13.4 GB of reads in this run.
 

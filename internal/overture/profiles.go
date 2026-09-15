@@ -101,6 +101,9 @@ func normalizeLanguages(l Languages) Languages {
 // Profiles can override it; zero disables the fallback.
 const DefaultFallbackDistance = 0.01
 
+// DefaultPointDistance is the search limit in metres when point fallback is enabled.
+const DefaultPointDistance = 500.0
+
 var defaultSubtypes = []string{"locality", "borough", "localadmin", "macrohood", "neighborhood", "microhood"}
 
 // defaultStateSubtypes is the state list unless a profile says otherwise.
@@ -119,12 +122,23 @@ func isLetter(b byte) bool { return 'A' <= b && b <= 'Z' || 'a' <= b && b <= 'z'
 // Profile sets boundary preferences, languages and fallbacks for a country.
 // Nil and empty fields inherit.
 type Profile struct {
-	PreferredSubtypes []string  `json:"preferredSubtypes"`
-	TieBreakMode      string    `json:"tieBreakMode"`
-	FallbackDistance  *float64  `json:"fallbackDistance,omitempty"` // planar degrees; 0 disables
-	Airports          *bool     `json:"airports,omitempty"`
-	Language          Languages `json:"language,omitempty"`
-	StateSubtypes     []string  `json:"stateSubtypes"`
+	PreferredSubtypes []string       `json:"preferredSubtypes"`
+	TieBreakMode      string         `json:"tieBreakMode"`
+	FallbackDistance  *float64       `json:"fallbackDistance,omitempty"` // planar degrees; 0 disables
+	Airports          *bool          `json:"airports,omitempty"`
+	Language          Languages      `json:"language,omitempty"`
+	StateSubtypes     []string       `json:"stateSubtypes"`
+	PointFallback     *bool          `json:"pointFallback,omitempty"`
+	PointDistance     *float64       `json:"pointDistance,omitempty"` // metres; 0 disables
+	CityOverrides     []CityOverride `json:"cityOverrides,omitempty"`
+}
+
+// CityOverride replaces a resolved city name, optionally restricted by State.
+// An empty To clears the city so the state or country fallback applies.
+type CityOverride struct {
+	From  string `json:"from"`
+	To    string `json:"to"`
+	State string `json:"state,omitempty"`
 }
 
 // Catalog is the profile file shape, bundled and user alike; keys are alpha-2.
@@ -142,8 +156,8 @@ type Profiles struct {
 
 // LoadProfiles reads the user catalog at path; an empty path means bundled
 // only. Unknown keys, content after the catalog, override keys that are not
-// alpha-2, unknown subtypes, unknown tie-break modes, negative distances and
-// malformed languages are errors.
+// alpha-2, unknown subtypes, unknown tie-break modes, negative distances,
+// city overrides without a name to match and malformed languages are errors.
 func LoadProfiles(path string) (*Profiles, error) {
 	p := &Profiles{path: path}
 	if err := decode(bundledJSON, &p.bundled); err != nil {
@@ -190,6 +204,14 @@ func decode(b []byte, c *Catalog) error {
 		}
 		if p.FallbackDistance != nil && *p.FallbackDistance < 0 {
 			return fmt.Errorf("%s: fallbackDistance %g is negative", name, *p.FallbackDistance)
+		}
+		if p.PointDistance != nil && *p.PointDistance < 0 {
+			return fmt.Errorf("%s: pointDistance %g is negative", name, *p.PointDistance)
+		}
+		for i, o := range p.CityOverrides {
+			if strings.TrimSpace(o.From) == "" {
+				return fmt.Errorf("%s: cityOverrides[%d] has no from", name, i)
+			}
 		}
 		return checkLanguages(name, p.Language)
 	}
@@ -249,6 +271,17 @@ func (p Profile) apply(o Profile) Profile {
 	if hasLanguages(o.Language) {
 		p.Language = slices.Clone(o.Language)
 	}
+	if o.PointFallback != nil {
+		b := *o.PointFallback
+		p.PointFallback = &b
+	}
+	if o.PointDistance != nil {
+		d := *o.PointDistance
+		p.PointDistance = &d
+	}
+	if len(o.CityOverrides) > 0 {
+		p.CityOverrides = slices.Clone(o.CityOverrides)
+	}
 	return p
 }
 
@@ -270,8 +303,42 @@ func (p Profile) normalize() Profile {
 		b := true
 		p.Airports = &b
 	}
+	if p.PointFallback == nil {
+		b := false
+		p.PointFallback = &b
+	}
+	if p.PointDistance == nil {
+		d := DefaultPointDistance
+		p.PointDistance = &d
+	}
 	p.Language = normalizeLanguages(p.Language)
+	p.CityOverrides = normalizeOverrides(p.CityOverrides)
 	return p
+}
+
+func normalizeOverrides(list []CityOverride) []CityOverride {
+	var out []CityOverride
+	for _, o := range list {
+		o.From, o.To, o.State = strings.TrimSpace(o.From), strings.TrimSpace(o.To), strings.TrimSpace(o.State)
+		if o.From != "" {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// Override returns the first matching index, or -1. Matching ignores case.
+// An empty State matches any state; an empty city never matches.
+func (p Profile) Override(city, state string) int {
+	if city == "" {
+		return -1
+	}
+	for i, o := range p.CityOverrides {
+		if strings.EqualFold(o.From, city) && (o.State == "" || strings.EqualFold(o.State, state)) {
+			return i
+		}
+	}
+	return -1
 }
 
 func normalizeSubtypes(list, def []string) []string {
@@ -339,8 +406,17 @@ func (p Profile) String() string {
 	if p.Airports != nil {
 		s += fmt.Sprintf(" airports=%t", *p.Airports)
 	}
+	if p.PointFallback != nil {
+		s += fmt.Sprintf(" points=%t", *p.PointFallback)
+		if *p.PointFallback && p.PointDistance != nil {
+			s += fmt.Sprintf("@%gm", *p.PointDistance)
+		}
+	}
 	if len(p.Language) > 0 {
 		s += " language=" + strings.Join(p.Language, ",")
+	}
+	if len(p.CityOverrides) > 0 {
+		s += fmt.Sprintf(" cityOverrides=%d", len(p.CityOverrides))
 	}
 	return s
 }

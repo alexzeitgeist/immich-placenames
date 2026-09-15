@@ -357,3 +357,55 @@ func TestClientBuiltOnce(t *testing.T) {
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Division rows lack is_land and is_territorial; country filtering still applies.
+func TestPointsWritesCountryLabels(t *testing.T) {
+	type row struct {
+		ID       string `parquet:"id"`
+		Geometry []byte `parquet:"geometry"`
+		Country  string `parquet:"country"`
+		Subtype  string `parquet:"subtype"`
+		Bbox     bbox   `parquet:"bbox"`
+		Names    names  `parquet:"names"`
+	}
+
+	var parquetData bytes.Buffer
+	w := parquet.NewWriter(&parquetData, parquet.SchemaOf(row{}))
+	for _, r := range []row{
+		{ID: "larsboda", Geometry: []byte{1}, Country: "SE", Subtype: "macrohood", Bbox: bbox{XMin: 18.1, YMin: 59.2, XMax: 18.1, YMax: 59.2}, Names: names{Primary: "Larsboda"}},
+		{ID: "elsewhere", Geometry: []byte{2}, Country: "NO", Subtype: "locality", Bbox: bbox{XMin: 10.7, YMin: 59.9, XMax: 10.7, YMax: 59.9}, Names: names{Primary: "Oslo"}},
+	} {
+		if err := w.Write(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	const key = "release/test/" + pointsPrefix + "division.parquet"
+	c := &Client{HTTP: serveBucket(t, key, parquetData.Bytes()), Workers: 1, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	dest := filepath.Join(t.TempDir(), "SE.geo")
+	count, err := c.Points(context.Background(), "test", "SE", geo.Bbox{XMin: 10, YMin: 55, XMax: 25, YMax: 70}, dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("wrote %d rows, want 1", count)
+	}
+	f, err := cache.Open(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if f.Header.Kind != "points" || f.Header.Code != "SE" || f.Header.Release != "test" {
+		t.Fatalf("header = %+v, want a Swedish points header", f.Header)
+	}
+	got := f.Rows[0]
+	got.Off, got.Len = 0, 0
+	want := cache.Row{ID: "larsboda", Country: "SE", Name: "Larsboda", Primary: "Larsboda", Subtype: "macrohood",
+		AdminLevel: -1, Land: true, Bbox: geo.Bbox{XMin: 18.1, YMin: 59.2, XMax: 18.1, YMax: 59.2}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("larsboda = %+v, want %+v", got, want)
+	}
+}

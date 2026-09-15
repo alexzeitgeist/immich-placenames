@@ -40,13 +40,16 @@ Export your Immich database credentials before running the binary; it does not r
 ./immich-placenames lookup 47.46 8.55
 ./immich-placenames lookup -airports=false 47.46 8.55
 ./immich-placenames lookup -airports=false -fallback-distance 0 47.46 8.55
+./immich-placenames lookup -points -point-distance 800 47.46 8.55
 ```
 
-The first lookup uses your profile. The second disables airport naming; the third also disables nearest-division matching. These flags apply only to that lookup. An empty city still falls back to the state, then the country.
+The first lookup uses your profile. The second disables airport naming; the third also disables nearest-division matching. The fourth enables [point fallback](#places-without-a-boundary) within 800 metres and downloads the country's point cache if needed. These flags apply only to that lookup. An empty city still falls back to the state, then the country.
 
 The output lists polygons whose bounding boxes contain the point. `IN` means the polygon contains it too; `bbox` means it does not. Each line includes subtype, administrative level, territorial status (`T`), bounding-box area, name language and decision. Area is in units of 0.0001 square degrees; edge distance is in degrees.
 
 `city`, `state` and `airport` mark selected candidates. `city, nearest` means the coastal fallback supplied the city. `contains, outranked` means another containing candidate won under the profile rules. Add `-json` for the same explanation as JSON.
+
+A `points/CC.geo` block appears when point fallback runs. Label distances are in metres, with nearby labels marked `near`. `city, point` marks the selected label; `outside NAME` means the label lies outside the containing administrative area; `beyond the distance` means it exceeds `pointDistance`. The diagnostic search uses a square large enough to include labels within twice `pointDistance`, so it can also list more distant labels. Only labels within `pointDistance` can be selected. An `override:` line shows any city-name replacement.
 
 Put flags before coordinates. Negative coordinates need no `--`: `lookup -8.51 115.26`.
 
@@ -104,7 +107,7 @@ The script counts equal and changed names for matching asset IDs and lists each 
 
 ## Profiles
 
-Start with `lookup`. Check whether the boundary you want appears and contains the point. Profiles cannot add missing boundaries or translations. If you want the municipality instead of an airport name, try `-airports=false` first.
+Start with `lookup`. Check whether the boundary you want appears and contains the point. Profiles cannot add missing boundaries or translations. Try [`pointFallback`](#places-without-a-boundary) if no boundary supplies a city name. If you want the municipality instead of an airport name, try `-airports=false` first.
 
 The tool loads `profiles.json` from the data directory, using bundled settings if the file is absent. An explicit `-profiles FILE` must exist.
 
@@ -133,12 +136,60 @@ This prefers `county`, then the largest bounding box when other city rankings ti
 | `fallbackDistance` | `0.01` degrees | Bound for nearest-division matching; zero disables it |
 | `airports` | `true` | Let a containing airport replace the city |
 | `language` | `en` | One name language or a list, tried in order |
+| `pointFallback` | `false` | Use nearby division points when no area supplies a city name |
+| `pointDistance` | `500` metres | Bound for division-point matching; zero disables it |
+| `cityOverrides` | none | Replace resolved city names |
 
 Both subtype lists accept `country`, `dependency`, `region`, `macroregion`, `county`, `macrocounty`, `localadmin`, `locality`, `borough`, `macrohood`, `neighborhood` and `microhood`.
 
-Country keys use two-letter codes such as `HR`. Unknown fields, invalid country keys, unknown subtypes or tie-break modes, negative distances and malformed language codes fail when the file loads.
+Country keys use two-letter codes such as `HR`. Unknown fields, invalid country keys, unknown subtypes or tie-break modes, negative distances, city overrides with an empty `from` and malformed language codes fail when the file loads.
 
-Fallback distance is measured in degrees, not metres. Candidates' bounding boxes must still contain the point, and subtype preference ranks before distance. See [boundary selection](DESIGN.md#boundary-selection).
+Fallback distance is measured in degrees, not metres. Candidates' bounding boxes must still contain the point, and subtype preference ranks before distance. `pointDistance` is measured in metres. See [boundary selection](DESIGN.md#boundary-selection).
+
+### Places without a boundary
+
+Overture stores place labels as division points, including for places without boundaries. Without a matching city boundary, a photo in a Stockholm suburb can get the county name. Enable point fallback to use nearby labels:
+
+```json
+{
+  "countryOverrides": {
+    "SE": {
+      "pointFallback": true,
+      "pointDistance": 500
+    }
+  }
+}
+```
+
+Point fallback is off by default. When enabled, it downloads a [point cache](DATA.md#geographic-data) if needed. Labels rank by subtype preference first. With the default order, a `locality` within the distance limit takes priority over a closer `neighborhood`. Keep the distance small unless a lookup shows that a wider search gives better names.
+
+The resolver checks areas with subtypes listed in `stateSubtypes`. Of those containing the photo's coordinates, it uses the one with the smallest bounding box. It rejects labels outside that area's boundary and lists them as `outside NAME`. If no such area contains the coordinates, only the subtype and distance limits apply.
+
+Try it on a coordinate first:
+
+```sh
+./immich-placenames lookup -points -point-distance 2000 59.241061 18.101586
+```
+
+### Renaming a city
+
+Where the resolver picks a name you do not want, rewrite it:
+
+```json
+{
+  "countryOverrides": {
+    "SE": {
+      "cityOverrides": [
+        {"from": "Mörtvik", "to": "Skogås", "state": "Stockholm County"}
+      ]
+    }
+  }
+}
+```
+
+`from` matches the resolved city name, including airport names. Matching ignores case. The first matching entry wins. Add `state` to distinguish places with the same name. An empty `to` clears the city, so the result falls back to the state, then the country.
+
+Overrides apply only to resolved city names. They leave state and country fields unchanged, including names used as fallbacks for an empty city. `lookup` reports each rewrite on an `override:` line, and `status` counts the entries in each profile.
 
 ### Languages
 
@@ -198,19 +249,21 @@ To prefetch a known release:
 
 ```sh
 ./immich-placenames fetch -release 2026-08-19.0 world airports HR CH
+./immich-placenames fetch -release 2026-08-19.0 -points HR CH
+./immich-placenames fetch -release 2026-08-19.0 -areas=false -points HR CH
 ```
 
-Replace HR/CH with the countries you need. Without `-release`, `fetch` selects the latest release from Overture's catalog, which may differ from your existing caches.
+Replace HR/CH with the countries you need. The second command fetches areas and points; the third adds points to existing caches without downloading the areas again. Without `-release`, `fetch` selects the latest release from Overture's catalog, which may differ from your existing caches.
 
 `-release` applies to the requested caches. Automatic world migration keeps its recorded release; include `world` in the fetch targets to change it.
 
-To refresh, pause the timer and fetch world, airports and all required countries at the same release. Check `status` and a dry run before resuming. Use the same procedure after a cache-format change; invalid caches are treated as missing and rebuilt.
+To refresh, pause the timer and fetch world, airports and all required countries at the same release. Include `-points` for countries where you use point fallback. Check `status` and a dry run before resuming. Use the same procedure after a cache-format change; invalid caches are treated as missing and rebuilt.
 
 Fetches use four workers by default. Try `-workers 2` if memory is tight. See [measured costs](DATA.md#download-costs); the cache's final size is much smaller than the transfer.
 
 ## Status and failures
 
-`status` lists each cache's release, row count, size, fetch time and available name languages, followed by effective profiles and the pending asset count. It does not fetch missing caches.
+`status` lists each cache's release, row count, size, fetch time and available name languages, followed by effective profiles and the pending asset count. It does not fetch missing caches. Profile lines show the point-fallback setting, such as `points=true@500m`, and the number of city overrides as `cityOverrides=N` when configured.
 
 Exit codes are 0 for success, 2 for usage errors and 1 for operational failures. Exit 1 can follow successful writes to earlier pages.
 

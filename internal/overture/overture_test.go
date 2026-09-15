@@ -182,12 +182,12 @@ func TestProfileMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]Profile{
-		"CH": {defaultSubtypes, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes},
-		"HR": {[]string{"county", "locality"}, TieBreakLargest, f64(0.005), boolp(false), Languages{"primary", "en"}, []string{"county", "region"}},
-		"IN": {[]string{"locality", "county"}, TieBreakSmallest, f64(0), boolp(true), Languages{"en", "primary"}, defaultStateSubtypes},
-		"DE": {[]string{"county", "locality", "localadmin", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes},
-		"FR": {[]string{"localadmin", "locality", "county", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakLargest, f64(0.005), boolp(true), Languages{"de", "en", "primary"}, defaultStateSubtypes},
-		"XX": {defaultSubtypes, TieBreakLargest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes},
+		"CH": {defaultSubtypes, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil},
+		"HR": {[]string{"county", "locality"}, TieBreakLargest, f64(0.005), boolp(false), Languages{"primary", "en"}, []string{"county", "region"}, boolp(false), f64(500), nil},
+		"IN": {[]string{"locality", "county"}, TieBreakSmallest, f64(0), boolp(true), Languages{"en", "primary"}, defaultStateSubtypes, boolp(false), f64(500), nil},
+		"DE": {[]string{"county", "locality", "localadmin", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil},
+		"FR": {[]string{"localadmin", "locality", "county", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakLargest, f64(0.005), boolp(true), Languages{"de", "en", "primary"}, defaultStateSubtypes, boolp(false), f64(500), nil},
+		"XX": {defaultSubtypes, TieBreakLargest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil},
 	}
 	for code, want := range cases {
 		if got := p.Profile(code); !reflect.DeepEqual(got, want) {
@@ -314,6 +314,9 @@ func (f *airportFetcher) World(context.Context, string, string) error {
 func (f *airportFetcher) Divisions(context.Context, string, geo.Bbox, string) error {
 	return errors.New("divisions fetched")
 }
+func (f *airportFetcher) Points(context.Context, string, geo.Bbox, string) error {
+	return errors.New("division points fetched")
+}
 func (f *airportFetcher) Airports(_ context.Context, dest string) error {
 	f.calls++
 	if f.fail {
@@ -408,6 +411,10 @@ func (f *worldFetcher) Divisions(_ context.Context, code string, _ geo.Bbox, des
 	}
 	writeCache(f.t, dest, cache.Row{ID: "l", Country: code, Name: "Real City", Subtype: "locality", Bbox: unitBox})
 	return nil
+}
+
+func (f *worldFetcher) Points(context.Context, string, geo.Bbox, string) error {
+	return errors.New("division points fetched")
 }
 
 func (f *worldFetcher) Airports(context.Context, string) error { return errors.New("airports fetched") }

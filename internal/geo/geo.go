@@ -179,13 +179,32 @@ func segmentDistance(ax, ay, bx, by, x, y float64) float64 {
 	return math.Hypot(ax+t*dx-x, ay+t*dy-y)
 }
 
+const earthRadius = 6371000 // metres
+
+// Window bounds latitude and wrapped longitude offsets for a search of m
+// metres at lat. It returns degrees, or 180 if the search reaches a pole.
+// Inputs must be a valid latitude and non-negative m.
+func Window(lat, m float64) float64 {
+	phi := math.Abs(lat) * math.Pi / 180
+	radius := m / earthRadius
+	if radius >= math.Pi/2-phi {
+		return 180
+	}
+	// Maximum longitude is slightly poleward of lat, where the circle touches
+	// a meridian. This offset also bounds latitude.
+	lon := math.Asin(math.Min(1, math.Sin(radius)/math.Cos(phi))) * 180 / math.Pi
+	// Round outward so the prefilter cannot drop a label Haversine accepts.
+	return math.Min(180, lon+1e-9)
+}
+
 // Haversine is the great-circle distance in metres.
 func Haversine(lat1, lon1, lat2, lon2 float64) float64 {
-	const r = 6371000
 	dLat := (lat2 - lat1) * math.Pi / 180
 	dLon := (lon2 - lon1) * math.Pi / 180
 	a := math.Sin(dLat/2)*math.Sin(dLat/2) + math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*math.Sin(dLon/2)*math.Sin(dLon/2)
-	return r * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	// Rounding at antipodes can put a slightly above 1.
+	a = math.Min(1, a)
+	return earthRadius * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }
 
 // WKB geometry types and EWKB flags.

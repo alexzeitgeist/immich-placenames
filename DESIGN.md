@@ -10,21 +10,28 @@ The resolver finds a country in `world.geo`, then reads that country's divisions
 
 Distance checks use the edge tolerance for countries and airports. Divisions use the larger of `fallbackDistance` and the edge tolerance. Candidates beyond these limits cannot affect the result. `lookup` uses exact distances for its diagnostic report.
 
+For division points, the resolver first searches a square covering the spherical circle of radius `pointDistance`. The search wraps longitude at the antimeridian and includes all longitudes if the circle reaches a pole. It then checks each label's great-circle distance against the metre limit. `lookup` searches a window based on twice that limit to show nearby rejected labels; the selection limit stays the same.
+
 Decoding allocates the polygon boxes once. Geometry lookups reuse them to skip boundary scans without allocating.
 
-Exact containment and matches within the edge tolerance use the same ranking:
+Matches within the edge tolerance rank the same as exact containment. Candidates rank as follows:
 
 | Result | Ranking |
 |---|---|
 | Country | Territorial status, smaller bounding-box area, ID |
 | City or state | Preferred subtype, lower administrative level (unknown last), territorial status, bounding-box area, ID |
+| Division point | Preferred subtype, distance, ID |
 | Airport | Class, distance to bounding-box centre, ID |
 
 The profile sets the city's area tie-break; states always prefer the smaller area. See [Profiles](HOWTO.md#profiles) for settings and examples.
 
 If no preferred subtype contains the point, the resolver tries nearby boundaries within `fallbackDistance` (default 0.01 degrees). Their bounding boxes must still contain the point. They rank by subtype preference, edge distance, then ID.
 
-When airport matching is enabled, a containing airport replaces the city. Nearby airports do not qualify. An empty city falls back to the state, then the country.
+If neither step finds a city and `pointFallback` is enabled, the resolver searches the country's division points within `pointDistance` (default 500 metres). Labels rank by subtype preference, distance, then ID. The resolver selects the containing division of a state subtype with the smallest bounding box and rejects labels outside its geometry. If no such division contains the query point, the resolver skips this check.
+
+When airport matching is enabled, a containing airport replaces the city. Nearby airports do not qualify.
+
+The resolver applies `cityOverrides` after airport matching. Entries match the resolved city name case-insensitively, with an optional state filter. An empty city falls back to the state, then the country. Overrides do not apply to these fallback names.
 
 ## Database writes
 
@@ -44,7 +51,7 @@ A dry run keeps all proposed names in memory to sort its CSV. Smaller pages won'
 
 The fetcher reads raw Parquet values by leaf column and resets name fields between rows to prevent names leaking from one record to the next.
 
-Each `.geo` file contains WKB geometry followed by a gob header and index. The header marks dependency support. Empty fetches fail and preserve existing files. Writers sync a temporary file before renaming it. Readers validate caches on open; invalid geometry fails the lookup.
+Each `.geo` file contains WKB geometry followed by a gob header and index. Each division-point row stores a point geometry and its zero-area bounding box. The header marks dependency support. Empty fetches fail and preserve existing files. Writers sync a temporary file before renaming it. Readers validate caches on open; invalid geometry fails the lookup.
 
 HTTP requests time out after two minutes, including body reads. Fetch workers read row groups in parallel; assets are resolved sequentially. See [DATA.md](DATA.md) for transfer and memory measurements.
 

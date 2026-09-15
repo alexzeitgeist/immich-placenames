@@ -33,6 +33,7 @@ const (
 	// Bucket serves the release files anonymously with range requests.
 	Bucket          = "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/"
 	divisionsPrefix = "theme=divisions/type=division_area/"
+	pointsPrefix    = "theme=divisions/type=division/"
 	infraPrefix     = "theme=base/type=infrastructure/"
 	footerBytes     = 4 << 20
 	batchRows       = 16
@@ -115,7 +116,7 @@ var worldSubtypes = []string{"country", "dependency"}
 // World writes every country and dependency row into dest.
 func (c *Client) World(ctx context.Context, release, dest string) (int, error) {
 	hdr := cache.Header{Kind: "world", Release: release, Fetched: time.Now().UTC(), Dependencies: true}
-	return c.divisions(ctx, release, "subtype", worldSubtypes, nil, hdr, dest, func(r *record) bool {
+	return c.divisions(ctx, release, divisionsPrefix, "subtype", worldSubtypes, nil, hdr, dest, func(r *record) bool {
 		return slices.Contains(worldSubtypes, r.subtype)
 	})
 }
@@ -124,7 +125,16 @@ func (c *Client) World(ctx context.Context, release, dest string) (int, error) {
 // admitting row groups by the country's bbox.
 func (c *Client) Divisions(ctx context.Context, release, code string, box geo.Bbox, dest string) (int, error) {
 	hdr := cache.Header{Kind: "divisions", Code: code, Release: release, Fetched: time.Now().UTC()}
-	return c.divisions(ctx, release, "country", []string{code}, &box, hdr, dest, func(r *record) bool {
+	return c.divisions(ctx, release, divisionsPrefix, "country", []string{code}, &box, hdr, dest, func(r *record) bool {
+		return r.country == code
+	})
+}
+
+// Points writes the country's division labels into dest. Missing is_land
+// and is_territorial columns use the reader's defaults.
+func (c *Client) Points(ctx context.Context, release, code string, box geo.Bbox, dest string) (int, error) {
+	hdr := cache.Header{Kind: "points", Code: code, Release: release, Fetched: time.Now().UTC()}
+	return c.divisions(ctx, release, pointsPrefix, "country", []string{code}, &box, hdr, dest, func(r *record) bool {
 		return r.country == code
 	})
 }
@@ -150,8 +160,8 @@ func (c *Client) Airports(ctx context.Context, release, dest string) (int, error
 	})
 }
 
-func (c *Client) divisions(ctx context.Context, release, filterCol string, filterVals []string, box *geo.Bbox, hdr cache.Header, dest string, keep func(*record) bool) (int, error) {
-	refs, err := c.plan(ctx, release, divisionsPrefix, filterCol, filterVals, box)
+func (c *Client) divisions(ctx context.Context, release, prefix, filterCol string, filterVals []string, box *geo.Bbox, hdr cache.Header, dest string, keep func(*record) bool) (int, error) {
+	refs, err := c.plan(ctx, release, prefix, filterCol, filterVals, box)
 	if err != nil {
 		return 0, err
 	}

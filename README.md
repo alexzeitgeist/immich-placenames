@@ -8,6 +8,8 @@ You can choose which kinds of places to use for names. That might mean a municip
 
 - Choose the language for place names, with different settings per country. English is the default.
 - Use airport names for photos taken within airport boundaries.
+- Use nearby place labels where Overture has no boundary. Off by default.
+- Replace resolved city names, with an optional state filter.
 - Preview proposed changes before writing them, or look up individual coordinates without connecting to Immich.
 - Fill missing names or reprocess existing ones, once or on a schedule.
 

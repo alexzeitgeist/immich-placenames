@@ -60,6 +60,12 @@ func TestNewFlagsValidateBeforeWork(t *testing.T) {
 		{"lookup", "-fallback-distance", "-Inf", "0", "0"},
 		{"lookup", "-fallback-distance", "abc", "0", "0"},
 		{"lookup", "-airports=maybe", "0", "0"},
+		{"lookup", "-point-distance", "-1", "0", "0"},
+		{"lookup", "-point-distance", "NaN", "0", "0"},
+		{"lookup", "-point-distance", "Inf", "0", "0"},
+		{"lookup", "-points=maybe", "0", "0"},
+		{"run", "-points=false"},
+		{"run", "-point-distance", "500"},
 		{"run", "-page-size", "-1"},
 		{"run", "-airports=false"},
 		{"run", "-fallback-distance", "0"},
@@ -86,6 +92,9 @@ func lookupCaches(t *testing.T, dir string) {
 		{overture.WorldPath(dir), 0, []cache.Row{{ID: "country", Country: "CH", Name: "Country", Subtype: "country", Bbox: box}}},
 		{overture.DivisionsPath(dir, "CH"), 0.005, []cache.Row{{ID: "region", Name: "State", Subtype: "region", Bbox: box}, {ID: "city", Name: "City", Subtype: "locality", Bbox: box}}},
 		{overture.AirportsPath(dir), 0, []cache.Row{{ID: "airport", Name: "Airport", Subtype: "airport", Class: "airport", Bbox: box}}},
+		// 0.001 degrees of longitude is 111 m at the equator.
+		{overture.PointsPath(dir, "CH"), 0.001, []cache.Row{{ID: "label", Name: "Label", Subtype: "locality",
+			Bbox: geo.Bbox{XMin: 0.001, XMax: 0.001}}}},
 	} {
 		w, err := cache.NewWriter(f.path, cache.Header{Kind: "test", Release: "fixture"})
 		if err != nil {
@@ -160,6 +169,75 @@ func TestLookupCLIOverrides(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(filepath.Join(dir, "profiles.json")); string(got) != profile {
 		t.Fatal("catalog changed")
+	}
+}
+
+func TestLookupPointFlags(t *testing.T) {
+	dir := t.TempDir()
+	lookupCaches(t, dir)
+	a := quiet(dir)
+	base := []string{"lookup", "-json", "-airports=false", "-fallback-distance", "0"}
+	for _, tc := range []struct {
+		flags    []string
+		city     string
+		fallback bool
+		distance float64
+		labels   int
+	}{
+		{nil, "Country", false, overture.DefaultPointDistance, 0},
+		{[]string{"-points"}, "Label", true, overture.DefaultPointDistance, 1},
+		// The 111 m label is outside even the doubled search window.
+		{[]string{"-points", "-point-distance", "50"}, "Country", true, 50, 0},
+		{[]string{"-points=false", "-point-distance", "50"}, "Country", false, 50, 0},
+	} {
+		var out strings.Builder
+		a.out = &out
+		args := append(append([]string{}, base...), tc.flags...)
+		args = append(args, "0", "0")
+		if err := a.call(args...); err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			Profile overture.Profile `json:"profile"`
+			Points  []struct {
+				Name   string  `json:"name"`
+				Metres float64 `json:"metres"`
+			} `json:"points"`
+			Final geocode.Result `json:"final"`
+		}
+		if err := json.Unmarshal([]byte(out.String()), &got); err != nil {
+			t.Fatalf("JSON %q: %v", out.String(), err)
+		}
+		if got.Final.City != tc.city || *got.Profile.PointFallback != tc.fallback || *got.Profile.PointDistance != tc.distance {
+			t.Fatalf("%v: %+v", args, got)
+		}
+		if len(got.Points) != tc.labels {
+			t.Fatalf("%v: %d label candidates, want %d: %+v", args, len(got.Points), tc.labels, got.Points)
+		}
+		if tc.labels == 1 && (got.Points[0].Name != "Label" || math.Abs(got.Points[0].Metres-111.19) > 0.1) {
+			t.Fatalf("%v: label candidate %+v", args, got.Points[0])
+		}
+	}
+}
+
+func TestPointExplanationDistanceUnits(t *testing.T) {
+	for _, tc := range []struct {
+		metres float64
+		want   string
+	}{
+		{0, "dist=     0m"},
+		{125, "dist=   125m"},
+	} {
+		var out strings.Builder
+		e := &overture.Explanation{
+			Code: "CH", Releases: map[string]string{"points/CH": "fixture"},
+			Points:    []overture.Candidate{{Name: "Label", Subtype: "locality", Metres: tc.metres}},
+			Divisions: []overture.Candidate{{Name: "Area", Subtype: "locality", Distance: 0.005}},
+		}
+		printExplanation(&out, e, geocode.Result{})
+		if got := out.String(); !strings.Contains(got, "near locality") || !strings.Contains(got, tc.want) || !strings.Contains(got, "dist=0.00500") {
+			t.Errorf("%g metres: wrong distance units in %q", tc.metres, got)
+		}
 	}
 }
 
