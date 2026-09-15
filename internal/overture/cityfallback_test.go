@@ -82,6 +82,9 @@ func TestCityFallbackMergeAndText(t *testing.T) {
 	if got := *bundled.Default().CityFallback; !reflect.DeepEqual(got, both) {
 		t.Errorf("bundled default: got %v, want %v", got, both)
 	}
+	if got, want := *bundled.Profile("US").CityFallback, []string{"county", geocode.SourceState, geocode.SourceCountry}; !reflect.DeepEqual(got, want) {
+		t.Errorf("bundled US: got %v, want %v", got, want)
+	}
 	if got := bundled.Default().String(); strings.Contains(got, "cityFallback") {
 		t.Errorf("the default chain needs no mention: %q", got)
 	}

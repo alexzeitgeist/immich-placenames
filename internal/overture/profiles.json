@@ -15,6 +15,9 @@
     "FR": {
       "preferredSubtypes": ["localadmin", "locality", "county", "borough", "macrohood", "neighborhood", "microhood"],
       "tieBreakMode": "largest-area"
+    },
+    "US": {
+      "cityFallback": ["county", "state", "country"]
     }
   }
 }

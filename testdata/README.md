@@ -2,7 +2,7 @@
 
 These tests use Overture release `2026-08-19.0` and this directory's [profiles.json](profiles.json). They ignore any profile in the cache directory.
 
-[samples.csv](samples.csv) has 16 reference points across AT, CH, DE, HR, ID, IN and US; [sea.csv](sea.csv) has two offshore points. We chose grid points and named sites for the tests, without copying photo coordinates. Case IDs label locations and have no link to Immich asset IDs.
+[samples.csv](samples.csv) has 19 reference points across AT, CH, DE, HR, ID, IN and US; [sea.csv](sea.csv) has two offshore points. We chose grid points and named sites for the tests, without copying photo coordinates. Case IDs label locations and have no link to Immich asset IDs.
 
 We checked the expected names against that release's boundaries and resolver results. The tests catch changes in those results; they don't independently verify geographic accuracy.
 
@@ -14,6 +14,9 @@ We checked the expected names against that release's boundaries and resolver res
 | Delhi and Faridabad | Local subtype first, county when no preferred local subtype contains |
 | Vienna, Ubud, Miami Beach, Fort Lauderdale, Westwood | District and locality selection |
 | Lapad and Cavtat water | Country/state at sea, nearest-city distance limit, state fallback with distance zero |
+| Everglades and Death Valley | The bundled US county fallback where no locality reaches the point |
+| Key West water | A nearby locality still outranks a containing county |
+| Jestetten district names | Bundled German ranking, its association names and the two ways past them |
 | Lapad language test | Croatian primary names and German translations |
 | Dependency territories | Country selection across 105 polygons and 53 codes |
 

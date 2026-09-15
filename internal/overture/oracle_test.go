@@ -239,6 +239,50 @@ func TestOracleAirportOverride(t *testing.T) {
 	}
 }
 
+// Associations and municipalities share a subtype. Rejecting only districts
+// leaves the larger association.
+func TestOracleGermanDistrictNames(t *testing.T) {
+	dir := oracleDataDir(t)
+	profiles, err := LoadProfiles("") // test bundled defaults
+	if err != nil {
+		t.Fatal(err)
+	}
+	districts := strs("Landkreis ", "Kreis ")
+	associations := strs("Landkreis ", "Kreis ", "GVV ", "VVG ")
+	for _, tc := range []struct {
+		name                string
+		override            Profile
+		jestetten, konstanz string
+	}{
+		{"bundled", Profile{}, "Landkreis Waldshut", "Landkreis Konstanz"},
+		{"districts rejected", Profile{RejectNamePrefixes: districts}, "GVV Jestetten", "VVG der Stadt Konstanz"},
+		{"associations rejected", Profile{RejectNamePrefixes: associations}, "Jestetten", "Constance"},
+		{"smallest area", Profile{RejectNamePrefixes: districts, TieBreakMode: TieBreakSmallest}, "Jestetten", "Litzelstetten"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New(dir, profiles, nil, slog.Default())
+			defer p.Close()
+			p.Overrides = tc.override
+			// Jestetten village centre and Litzelstetten, a district of Konstanz.
+			for _, c := range []struct {
+				pt   geocode.Point
+				city string
+			}{
+				{geocode.Point{Lat: 47.6467, Lon: 8.5686}, tc.jestetten},
+				{geocode.Point{Lat: 47.7069, Lon: 9.1667}, tc.konstanz},
+			} {
+				res, err := p.Resolve(context.Background(), c.pt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if res.City != c.city || res.State != "Baden-Württemberg" {
+					t.Errorf("%v: city %q in %q, want %q in Baden-Württemberg", c.pt, res.City, res.State, c.city)
+				}
+			}
+		})
+	}
+}
+
 func TestOracleIgnoresCacheProfile(t *testing.T) {
 	dir := oracleDataDir(t)
 	isolated := t.TempDir()

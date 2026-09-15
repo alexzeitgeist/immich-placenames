@@ -111,7 +111,7 @@ Start with `lookup`. Check whether the boundary you want appears and contains th
 
 The tool loads `profiles.json` from the data directory, using bundled settings if the file is absent. An explicit `-profiles FILE` must exist.
 
-Fields merge in this order: bundled default → bundled country → user default → user country. Your global defaults can override the bundled DE/FI/FR rules. Missing fields, nulls, empty lists and blank strings inherit; `false` and zero override. For `rejectNamePrefixes` and `cityFallback`, an empty list clears the inherited value instead.
+Fields merge in this order: bundled default → bundled country → user default → user country. Your global defaults can override the bundled DE/FI/FR/US rules. Missing fields, nulls, empty lists and blank strings inherit; `false` and zero override. For `rejectNamePrefixes` and `cityFallback`, an empty list clears the inherited value instead.
 
 For example, to prefer municipality boundaries in Croatia:
 
@@ -176,9 +176,9 @@ Try it on a coordinate first:
 
 ### When nothing names the city
 
-Immich shows the city, so a city that no boundary or label supplied repeats the state, and then the country when there is no state either. A photo in the Everglades becomes `Florida, Florida, United States`.
+If no boundary or label supplies a city, the default fallback copies the state, or the country if the state is empty. With this fallback, a photo in the Everglades gets `Florida, Florida, United States`.
 
-To try county names in the United States, set:
+The bundled US profile tries a county first:
 
 ```json
 {
@@ -192,11 +192,11 @@ To try county names in the United States, set:
 
 This gives `Monroe County, Florida, United States` at the Everglades example below. Other examples include `Inyo County, California, United States` in Death Valley and `San Francisco, California, United States` in San Francisco Bay.
 
-To leave the city empty, set `"cityFallback": []`. The writer stores an empty city as NULL.
+You can configure division subtypes for other countries too. To leave the city empty, set `"cityFallback": []`. The writer stores an empty city as NULL.
 
-The list accepts `state`, `country` and the division subtypes, tried in order. A subtype takes the division of that subtype containing the photo, or the nearest one within `fallbackDistance`, preferring the smallest bounding box. A name that `rejectNamePrefixes` rejects leaves its source empty, so the next source fills the city.
+The resolver tries `state`, `country` and division subtypes in the listed order. For a subtype, it uses the same ranking as state selection: a containing division first, then the nearest within `fallbackDistance`. It skips names matched by `rejectNamePrefixes` and tries the next source if no candidate remains.
 
-The fallback runs last, after nearest-division matching, point fallback, airport names and city overrides, so it fills only a city nothing else produced. A county in `cityFallback` therefore cannot take the city from a nearby locality, while a county in `preferredSubtypes` can, because containing boundaries are chosen before nearby ones. The fill copies the name as resolved and leaves the state and country alone.
+The resolver applies `cityFallback` after nearest-division matching, point fallback, airports and city overrides, and only if the city is empty. A county in this list leaves a nearby locality's name intact. Putting county in `preferredSubtypes` gives a containing county priority over nearby localities. The fallback leaves the state and country unchanged.
 
 Try it on a coordinate first:
 
@@ -230,17 +230,28 @@ Overrides apply only to resolved city names. They leave state and country fields
 
 ### Skipping names
 
-The German profile prefers counties to name photos in Stuttgart or Munich after the city. This can give rural photos a district name such as `Landkreis Oberallgäu` instead of `Oberstdorf`. To skip these names and use the next candidate in the ranking:
+The German profile prefers counties to name photos in Stuttgart or Munich after the city. This can give rural photos a district name such as `Landkreis Waldshut` instead of `Jestetten`. To skip these names and leave the choice to the next candidate:
 
 ```json
 {
   "countryOverrides": {
     "DE": {
-      "rejectNamePrefixes": ["Landkreis ", "Kreis "]
+      "rejectNamePrefixes": ["Landkreis ", "Kreis ", "GVV ", "VVG "]
     }
   }
 }
 ```
+
+Overture classifies `GVV Jestetten` and `VVG der Stadt Titisee-Neustadt` as `locality`, just like their member municipalities. The German profile prefers the largest bounding box when other rankings tie. Rejecting only district names therefore gives `GVV Jestetten` instead of `Jestetten`. These four prefixes were checked in Baden-Württemberg; they may not cover every association name.
+
+With `smallest-area`, the resolver can select a village within the municipality:
+
+| Setting | At Jestetten | At Litzelstetten near Konstanz |
+|---|---|---|
+| Reject `GVV ` and `VVG ` too | Jestetten | Constance |
+| Reject the district prefixes with `"tieBreakMode": "smallest-area"` | Jestetten | Litzelstetten |
+
+Choose municipality or village names to suit your library. Both rows use English names.
 
 No prefixes are rejected by default. If you set prefixes in `defaultProfile`, use `"rejectNamePrefixes": []` in a country override to clear the inherited list.
 
