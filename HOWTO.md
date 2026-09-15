@@ -10,7 +10,7 @@ For Docker, complete the [Compose setup](deploy/README.md), then replace `./immi
 
 ```sh
 sudo docker compose --project-directory /opt/immich-placenames \
-  -f /opt/immich-placenames/compose.yml --profile placenames \
+  -f /opt/immich-placenames/compose.yml \
   run --rm --no-deps immich-placenames
 ```
 

@@ -2,6 +2,8 @@
 
 Run immich-placenames as a separate Compose project on the same Docker host as Immich, connected to its existing database network. This setup has been tested with Immich v3.1.0.
 
+Use `docker compose run --rm` for individual commands. Plain `docker compose up` runs one naming pass against the database and exits; use the timer below for hourly scheduling.
+
 [Back up the database](https://docs.immich.app/administration/backup-and-restore/) and disable [Immich's built-in reverse geocoding](https://docs.immich.app/administration/system-settings/#reverse-geocoding-settings) before writing names.
 
 Build from the project root:
@@ -29,10 +31,10 @@ Check the configuration, download the data and preview the names:
 
 ```sh
 cd /opt/immich-placenames
-sudo docker compose --profile placenames config --quiet
-sudo docker compose --profile placenames run --rm --no-deps immich-placenames fetch -data /data world airports HR CH
-sudo docker compose --profile placenames run --rm --no-deps immich-placenames status -data /data
-sudo docker compose --profile placenames run --rm --no-deps immich-placenames run -data /data -dry-run
+sudo docker compose config --quiet
+sudo docker compose run --rm --no-deps immich-placenames fetch -data /data world airports HR CH
+sudo docker compose run --rm --no-deps immich-placenames status -data /data
+sudo docker compose run --rm --no-deps immich-placenames run -data /data -dry-run
 ```
 
 Replace HR/CH with the countries in your library. With release `2026-08-19.0`, the airport download read about 13.4 GB and world boundaries about 1.65 GB. A dry run can download missing caches too. Later runs reuse them.

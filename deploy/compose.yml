@@ -1,6 +1,5 @@
 services:
   immich-placenames:
-    profiles: [placenames]
     image: ${IMMICH_PLACENAMES_IMAGE:-immich-placenames:local}
     pull_policy: never
     environment:
