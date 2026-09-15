@@ -2,6 +2,8 @@
 
 immich-placenames is a CLI built as one static Go binary. The `run` command makes one pass; scheduling is external. Overture is the only implemented provider.
 
+Names come from Overture's `divisions` theme, with airport polygons from `base`. Census boundaries, protected areas and national parks are outside the planned scope. Supporting them would require surveying Overture's available subtypes and adding a cache kind for sources such as `base` land use.
+
 ## Boundary selection
 
 `world.geo` includes countries and dependency territories. They can overlap: Gibraltar wins over Spain's territorial polygon on bounding-box size; both are territorial.
@@ -35,11 +37,15 @@ If neither step finds a city and `pointFallback` is enabled, the resolver search
 
 When airport matching is enabled, a containing airport replaces the city. Nearby airports do not qualify.
 
-The resolver applies `cityOverrides` after airport matching. Entries match the resolved city name case-insensitively, with an optional state filter. An empty city falls back to the state, then the country. Overrides do not apply to these fallback names.
+The resolver applies `cityOverrides` after airport matching. Entries match the resolved city name case-insensitively, with an optional state filter.
+
+The resolver fills an empty city last, using `cityFallback` in order: state, then country by default. A division subtype, such as `county`, uses the same selection rules as the state: a containing division, then the nearest within `fallbackDistance`. An empty list leaves the city empty. Fallback names bypass city overrides and leave the state and country unchanged.
+
+The resolver selects fallback divisions after name rejection but before assigning country, state or city roles, so a division can supply more than one field. It applies the fallback only after the earlier matching steps and city overrides.
 
 ## Database writes
 
-The writer updates `asset_exif.city`, `state` and `country` directly in PostgreSQL, joining to `asset` through `assetId`.
+The writer updates `asset_exif.city`, `state` and `country` directly in PostgreSQL, joining to `asset` through `assetId`. It stores an empty city or state as NULL.
 
 A run selects pages in `(createdAt, id)` order, up to the greatest eligible key at startup. It resolves each page before opening a transaction, keeping downloads and geometry work outside the transaction.
 
@@ -64,7 +70,7 @@ HTTP requests time out after two minutes, including body reads. Fetch workers re
 | Package | Responsibility |
 |---|---|
 | `cmd/immich-placenames` | CLI, diagnostics and run loop |
-| `internal/geocode` | Provider interface, result types and final city fallback |
+| `internal/geocode` | Provider interface, result types and the city fallback |
 | `internal/geo` | Geometry decoding, containment and edge distance |
 | `internal/cache` | Cache format and publication |
 | `internal/overture/fetch` | Overture listing and Parquet reads |

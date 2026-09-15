@@ -180,7 +180,7 @@ func TestPointFallbackNamesTheCity(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Resolve and Explain must agree despite their different search windows.
-			if res.City != tc.city || e.Result != res {
+			if e.City != tc.city || e.Result != res {
 				t.Errorf("resolve %+v, explain %+v; want city %q", res, e.Result, tc.city)
 			}
 			if len(e.Points) != tc.labels {
@@ -194,8 +194,12 @@ func TestPointFallbackNamesTheCity(t *testing.T) {
 					t.Errorf("%s: decision %q, want %q", c.ID, c.Decision, want)
 				}
 			}
-			if res.City == "" && res.WithFallback().City != "Big Region" {
-				t.Errorf("state fallback: %+v", res.WithFallback())
+			want := tc.city
+			if want == "" {
+				want = "Big Region" // no label: the state fills the city
+			}
+			if res.City != want {
+				t.Errorf("city %q, want %q", res.City, want)
 			}
 		})
 	}
@@ -253,7 +257,7 @@ func TestPointFallbackSphericalBounds(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if res.City != tc.wantCity || res.State != "Test Region" || res != e.Result {
+			if e.City != tc.wantCity || res.State != "Test Region" || res != e.Result {
 				t.Errorf("label %.8f m away, bound %g: Resolve=%+v, Explain=%+v; want city %q",
 					geo.Haversine(tc.pt.Lat, tc.pt.Lon, tc.label.Lat, tc.label.Lon), tc.bound, res, e.Result, tc.wantCity)
 			}
@@ -312,7 +316,7 @@ func TestPointsFetchedOnDemand(t *testing.T) {
 		err     bool
 	}{
 		{"fetched", `{"airports": false, "pointFallback": true}`, false, "Fetched Label", 1, false},
-		{"off", `{"airports": false}`, false, "", 0, false},
+		{"off", `{"airports": false}`, false, "Big Region", 0, false},
 		{"failed", `{"airports": false, "pointFallback": true}`, true, "", 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

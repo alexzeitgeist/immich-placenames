@@ -43,13 +43,13 @@ Export your Immich database credentials before running the binary; it does not r
 ./immich-placenames lookup -points -point-distance 800 47.46 8.55
 ```
 
-The first lookup uses your profile. The second disables airport naming; the third also disables nearest-division matching. The fourth enables [point fallback](#places-without-a-boundary) within 800 metres and downloads the country's point cache if needed. These flags apply only to that lookup. An empty city still falls back to the state, then the country.
+The first lookup uses your profile. The second disables airport naming; the third also disables nearest-division matching. The fourth enables [point fallback](#places-without-a-boundary) within 800 metres and downloads the country's point cache if needed. These flags apply only to that lookup. The resolver fills an empty city using [`cityFallback`](#when-nothing-names-the-city).
 
 The output lists polygons whose bounding boxes contain the point. `IN` means the polygon contains it too; `bbox` means it does not. Each line includes subtype, administrative level, territorial status (`T`), bounding-box area, name language and decision. Area is in units of 0.0001 square degrees; edge distance is in degrees.
 
 `city`, `state` and `airport` mark selected candidates. `city, nearest` means the coastal fallback supplied the city. `contains, outranked` means another containing candidate won under the profile rules. Add `-json` for the same explanation as JSON.
 
-A `points/CC.geo` block appears when point fallback runs. Label distances are in metres, with nearby labels marked `near`. `city, point` marks the selected label; `outside NAME` means the label lies outside the containing administrative area; `beyond the distance` means it exceeds `pointDistance`. The diagnostic search uses a square large enough to include labels within twice `pointDistance`, so it can also list more distant labels. Only labels within `pointDistance` can be selected. An `override:` line shows any city-name replacement.
+A `points/CC.geo` block appears when point fallback runs. Label distances are in metres, with nearby labels marked `near`. `city, point` marks the selected label; `outside NAME` means the label lies outside the containing administrative area; `beyond the distance` means it exceeds `pointDistance`. The diagnostic search uses a square large enough to include labels within twice `pointDistance`, so it can also list more distant labels. Only labels within `pointDistance` can be selected. An `override:` line shows any city-name replacement, and a `city fallback:` line names the source that filled an empty city.
 
 Put flags before coordinates. Negative coordinates need no `--`: `lookup -8.51 115.26`.
 
@@ -62,7 +62,7 @@ Put flags before coordinates. Negative coordinates need no `--`: `lookup -8.51 1
 
 The first command selects assets with null city and country. The second includes already-named assets. Both require coordinates and exclude deleted assets.
 
-The output contains the build revision, cache releases and profiles, then an `assetId,city,state,country` CSV and grouped summary. Language counts show how often each name source was used.
+The output contains the build revision, cache releases and profiles, then an `assetId,city,state,country` CSV and grouped summary. The `# names` line counts names by language; `# fallback` counts city fallbacks by source. A write run logs the same total as `city_fallback`.
 
 `-limit 50` selects at most 50 assets in creation-time and ID order. Failures and points with no matching country count toward the limit.
 
@@ -111,7 +111,7 @@ Start with `lookup`. Check whether the boundary you want appears and contains th
 
 The tool loads `profiles.json` from the data directory, using bundled settings if the file is absent. An explicit `-profiles FILE` must exist.
 
-Fields merge in this order: bundled default → bundled country → user default → user country. Your global defaults can override the bundled DE/FI/FR rules. Missing fields, nulls, empty lists and blank strings inherit; `false` and zero override. For `rejectNamePrefixes`, an empty list clears inherited prefixes.
+Fields merge in this order: bundled default → bundled country → user default → user country. Your global defaults can override the bundled DE/FI/FR rules. Missing fields, nulls, empty lists and blank strings inherit; `false` and zero override. For `rejectNamePrefixes` and `cityFallback`, an empty list clears the inherited value instead.
 
 For example, to prefer municipality boundaries in Croatia:
 
@@ -141,10 +141,11 @@ This prefers `county`, then the largest bounding box when other city rankings ti
 | `cityOverrides` | none | Replace resolved city names |
 | `rejectNamePrefixes` | none | Skip names starting with a listed prefix |
 | `countryFrom` | none | Division subtype whose name replaces the country |
+| `cityFallback` | `state, country` | Sources for an empty city: state, country or a division subtype |
 
 Both subtype lists accept `country`, `dependency`, `region`, `macroregion`, `county`, `macrocounty`, `localadmin`, `locality`, `borough`, `macrohood`, `neighborhood` and `microhood`.
 
-`countryFrom` accepts the same subtype names. Country keys use two-letter codes such as `HR`. Unknown fields, invalid country keys, unknown subtypes or tie-break modes, negative distances, city overrides with an empty `from`, empty reject prefixes and malformed language codes fail when the file loads.
+`countryFrom` accepts the same subtype names, and `cityFallback` accepts them alongside `state` and `country`. Country keys use two-letter codes such as `HR`. Unknown fields, invalid country keys, unknown subtypes, tie-break modes or fallback sources, negative distances, city overrides with an empty `from`, empty reject prefixes and malformed language codes fail when the file loads.
 
 Fallback distance is measured in degrees, not metres. Candidates' bounding boxes must still contain the point, and subtype preference ranks before distance. `pointDistance` is measured in metres. See [boundary selection](DESIGN.md#boundary-selection).
 
@@ -173,6 +174,38 @@ Try it on a coordinate first:
 ./immich-placenames lookup -points -point-distance 2000 59.241061 18.101586
 ```
 
+### When nothing names the city
+
+Immich shows the city, so a city that no boundary or label supplied repeats the state, and then the country when there is no state either. A photo in the Everglades becomes `Florida, Florida, United States`.
+
+To try county names in the United States, set:
+
+```json
+{
+  "countryOverrides": {
+    "US": {
+      "cityFallback": ["county", "state", "country"]
+    }
+  }
+}
+```
+
+This gives `Monroe County, Florida, United States` at the Everglades example below. Other examples include `Inyo County, California, United States` in Death Valley and `San Francisco, California, United States` in San Francisco Bay.
+
+To leave the city empty, set `"cityFallback": []`. The writer stores an empty city as NULL.
+
+The list accepts `state`, `country` and the division subtypes, tried in order. A subtype takes the division of that subtype containing the photo, or the nearest one within `fallbackDistance`, preferring the smallest bounding box. A name that `rejectNamePrefixes` rejects leaves its source empty, so the next source fills the city.
+
+The fallback runs last, after nearest-division matching, point fallback, airport names and city overrides, so it fills only a city nothing else produced. A county in `cityFallback` therefore cannot take the city from a nearby locality, while a county in `preferredSubtypes` can, because containing boundaries are chosen before nearby ones. The fill copies the name as resolved and leaves the state and country alone.
+
+Try it on a coordinate first:
+
+```sh
+./immich-placenames lookup -profiles data/try.json 25.4 -80.9
+```
+
+The lookup prints the source on a `city fallback:` line and marks the selected division `city fallback`. `run -dry-run` counts the filled cities by source on its `# fallback` line.
+
 ### Renaming a city
 
 Where the resolver picks a name you do not want, rewrite it:
@@ -189,9 +222,11 @@ Where the resolver picks a name you do not want, rewrite it:
 }
 ```
 
-`from` matches the resolved city name, including airport names. Matching ignores case. The first matching entry wins. Add `state` to distinguish places with the same name. An empty `to` clears the city, so the result falls back to the state, then the country.
+`from` matches the resolved city name, including airport names. Matching ignores case. The first matching entry wins. Add `state` to distinguish places with the same name. An empty `to` clears the city before the [city fallback](#when-nothing-names-the-city) runs.
 
-Overrides apply only to resolved city names. They leave state and country fields unchanged, including names used as fallbacks for an empty city. `lookup` reports each rewrite on an `override:` line, and `status` counts the entries in each profile.
+If `cityFallback` includes the subtype that supplied the cleared name, it can restore that name. Remove the subtype from the chain, or use [`rejectNamePrefixes`](#skipping-names) to reject the name during selection, including fallback selection.
+
+Overrides apply only to resolved city names. They leave state and country fields unchanged, and do not apply to a name the city fallback copied. `lookup` reports each rewrite on an `override:` line, and `status` counts the entries in each profile.
 
 ### Skipping names
 
@@ -303,7 +338,7 @@ Fetches use four workers by default. Try `-workers 2` if memory is tight. See [m
 
 ## Status and failures
 
-`status` lists each cache's release, row count, size, fetch time and available name languages, followed by effective profiles and the pending asset count. It does not fetch missing caches. Profile lines show the point-fallback setting, such as `points=true@500m`, and the number of city overrides as `cityOverrides=N` when configured.
+`status` lists each cache's release, row count, size, fetch time and available name languages, followed by effective profiles and the pending asset count. It does not fetch missing caches. Profile lines show the point-fallback setting, such as `points=true@500m`, and the number of city overrides as `cityOverrides=N` when configured. A city fallback other than the default appears as `cityFallback=[country]` or `cityFallback=[]`.
 
 Exit codes are 0 for success, 2 for usage errors and 1 for operational failures. Exit 1 can follow successful writes to earlier pages.
 

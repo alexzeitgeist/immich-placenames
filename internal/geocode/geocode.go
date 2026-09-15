@@ -32,19 +32,33 @@ type Resolver interface {
 	Resolve(ctx context.Context, p Point) (Result, error)
 }
 
-// WithFallback fills an empty city from the state, then the country, once.
-// A result that was not found is returned unchanged.
-func (r Result) WithFallback() Result {
-	if !r.Found {
-		return r
+// Fallback sources available from Result.
+const (
+	SourceState   = "state"
+	SourceCountry = "country"
+)
+
+// FillCity fills an empty city from the first nonempty source and returns its key.
+// State and country come from r; other sources come from extra.
+// Unmatched results and existing city names are unchanged.
+func (r Result) FillCity(sources []string, extra map[string]string) (Result, string) {
+	if !r.Found || r.City != "" {
+		return r, ""
 	}
-	if r.City == "" {
-		r.City = r.State
+	for _, s := range sources {
+		name := extra[s]
+		switch s {
+		case SourceState:
+			name = r.State
+		case SourceCountry:
+			name = r.Country
+		}
+		if name != "" {
+			r.City = name
+			return r, s
+		}
 	}
-	if r.City == "" {
-		r.City = r.Country
-	}
-	return r
+	return r, ""
 }
 
 // Writable reports whether the result may be written to Immich: found, with a country.
@@ -67,9 +81,9 @@ type Outcome struct {
 // ErrNoCountry marks a resolver answer that claims a place without a country.
 var ErrNoCountry = errors.New("resolver returned a place without a country")
 
-// ResolveAll resolves the assets in order and applies the city fallback.
-// It stops at context cancellation, returning the outcomes so far and the
-// context error. Per-asset resolver errors are outcomes, not a stop.
+// ResolveAll resolves assets in order. The resolver handles city fallback.
+// Cancellation returns partial outcomes and the context error.
+// Per-asset errors are recorded in the outcomes; processing continues.
 func ResolveAll(ctx context.Context, r Resolver, assets []Asset) ([]Outcome, error) {
 	out := make([]Outcome, 0, len(assets))
 	for _, a := range assets {
@@ -83,7 +97,7 @@ func ResolveAll(ctx context.Context, r Resolver, assets []Asset) ([]Outcome, err
 		case res.Found && res.Country == "":
 			out = append(out, Outcome{Asset: a, Err: ErrNoCountry})
 		default:
-			out = append(out, Outcome{Asset: a, Result: res.WithFallback()})
+			out = append(out, Outcome{Asset: a, Result: res})
 		}
 	}
 	return out, nil

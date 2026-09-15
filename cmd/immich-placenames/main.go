@@ -445,16 +445,12 @@ func (a *app) lookup(ctx context.Context, fs *flag.FlagSet, args []string) error
 	if err != nil {
 		return err
 	}
-	final := e.Result.WithFallback()
 	if *asJSON {
 		enc := json.NewEncoder(a.out)
 		enc.SetIndent("", "  ")
-		return enc.Encode(struct {
-			*overture.Explanation
-			Final geocode.Result `json:"final"`
-		}{e, final})
+		return enc.Encode(e)
 	}
-	printExplanation(a.out, e, final)
+	printExplanation(a.out, e)
 	return nil
 }
 
@@ -465,7 +461,7 @@ func or(s, def string) string {
 	return s
 }
 
-func printExplanation(out io.Writer, e *overture.Explanation, final geocode.Result) {
+func printExplanation(out io.Writer, e *overture.Explanation) {
 	w := bufio.NewWriter(out)
 	defer w.Flush()
 	fmt.Fprintf(w, "point %.7f %.7f\n", e.Point.Lat, e.Point.Lon)
@@ -500,9 +496,17 @@ func printExplanation(out io.Writer, e *overture.Explanation, final geocode.Resu
 		fmt.Fprintf(w, "country: %s to %s\n", e.CountryReplaced, or(e.Result.Country, "-"))
 	}
 	if e.Overridden != "" {
-		fmt.Fprintf(w, "override: %s to %s\n", e.Overridden, or(e.Result.City, "-"))
+		city := e.Result.City
+		if e.CityFilledFrom != "" {
+			// A fallback after an override means the override cleared the city.
+			city = ""
+		}
+		fmt.Fprintf(w, "override: %s to %s\n", e.Overridden, or(city, "-"))
 	}
-	fmt.Fprintf(w, "result: %s, %s, %s\n", final.City, final.State, final.Country)
+	if e.CityFilledFrom != "" {
+		fmt.Fprintf(w, "city fallback: %s\n", e.CityFilledFrom)
+	}
+	fmt.Fprintf(w, "result: %s, %s, %s\n", e.Result.City, e.Result.State, e.Result.Country)
 }
 
 // printCandidate prints area in 1e-4 square degrees, distance and name language.
@@ -586,7 +590,7 @@ func (a *app) run(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		a.log.Warn("mixed cache releases", "caches", strings.Join(overture.SortedReleases(releases), ", "))
 	}
 	if runErr == nil && opts.DryRun {
-		runErr = printDryRun(a.out, report.Updates, releases, p.Profiles.Describe(), p.Served(), opts.All, report.Selected)
+		runErr = printDryRun(a.out, report.Updates, releases, p.Profiles.Describe(), p.Served(), p.Filled(), opts.All, report.Selected)
 		if runErr == nil {
 			report.Reported = len(report.Updates)
 		}
@@ -597,7 +601,7 @@ func (a *app) run(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	}
 	a.log.Info(message, "selected", report.Selected, "written", report.Written, "reported", report.Reported,
 		"no_country", report.NoCountry, "changed", report.Changed, "overridden", p.Overridden(),
-		"errors", report.Failed, "committed_pages", report.CommittedPages)
+		"city_fallback", total(p.Filled()), "errors", report.Failed, "committed_pages", report.CommittedPages)
 	if runErr != nil {
 		if opts.DryRun {
 			return fmt.Errorf("dry-run stopped: %w", runErr)
@@ -610,6 +614,14 @@ func (a *app) run(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	return nil
 }
 
+func total(m map[string]int) int {
+	n := 0
+	for _, v := range m {
+		n += v
+	}
+	return n
+}
+
 func distinct(m map[string]string) int {
 	seen := map[string]bool{}
 	for _, v := range m {
@@ -618,29 +630,17 @@ func distinct(m map[string]string) int {
 	return len(seen)
 }
 
-// printDryRun writes metadata comments, per-asset CSV rows and a grouped summary.
-func printDryRun(out io.Writer, updates []immich.Update, releases map[string]string, profiles string, served map[string]int, all bool, selected int) error {
+// printDryRun writes metadata, per-asset CSV rows and a grouped summary.
+// served counts names by language; filled counts city fallbacks by source.
+func printDryRun(out io.Writer, updates []immich.Update, releases map[string]string, profiles string, served, filled map[string]int, all bool, selected int) error {
 	w := bufio.NewWriter(out)
 	fmt.Fprintf(w, "# immich-placenames %s\n", version())
 	for _, r := range overture.SortedReleases(releases) {
 		fmt.Fprintf(w, "# cache %s\n", r)
 	}
 	fmt.Fprintf(w, "# profiles %s\n", profiles)
-	langs := make([]string, 0, len(served))
-	for k := range served {
-		langs = append(langs, k)
-	}
-	sort.Slice(langs, func(i, j int) bool {
-		if served[langs[i]] != served[langs[j]] {
-			return served[langs[i]] > served[langs[j]]
-		}
-		return langs[i] < langs[j]
-	})
-	fmt.Fprint(w, "# names")
-	for _, k := range langs {
-		fmt.Fprintf(w, " %s=%d", k, served[k])
-	}
-	fmt.Fprintln(w)
+	printCounts(w, "names", served)
+	printCounts(w, "fallback", filled)
 	sel := "unprocessed"
 	if all {
 		sel = "all"
@@ -679,6 +679,25 @@ func printDryRun(out io.Writer, updates []immich.Update, releases map[string]str
 	}
 	cw.Flush()
 	return errors.Join(cw.Error(), w.Flush())
+}
+
+// printCounts writes a comment line of key=count pairs, most frequent first.
+func printCounts(w io.Writer, label string, counts map[string]int) {
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if counts[keys[i]] != counts[keys[j]] {
+			return counts[keys[i]] > counts[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	fmt.Fprint(w, "# "+label)
+	for _, k := range keys {
+		fmt.Fprintf(w, " %s=%d", k, counts[k])
+	}
+	fmt.Fprintln(w)
 }
 
 // status lists the caches, the profile source with one line per effective

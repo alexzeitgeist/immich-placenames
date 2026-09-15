@@ -169,7 +169,7 @@ func TestDryRunPageParityAndDebug(t *testing.T) {
 		if err != nil || len(s.writes) != 0 || r.Written != 0 || r.CommittedPages != 0 {
 			t.Fatalf("report %+v error %v", r, err)
 		}
-		if err := printDryRun(&csv, r.Updates, nil, "bundled", nil, false, r.Selected); err != nil {
+		if err := printDryRun(&csv, r.Updates, nil, "bundled", nil, nil, false, r.Selected); err != nil {
 			t.Fatal(err)
 		}
 		if baseline == "" {
@@ -184,12 +184,30 @@ func TestDryRunPageParityAndDebug(t *testing.T) {
 	}
 }
 
+func TestDryRunHeaderCounts(t *testing.T) {
+	var out strings.Builder
+	served, filled := map[string]int{"en": 3, "de": 5}, map[string]int{"state": 2, "country": 7}
+	if err := printDryRun(&out, nil, nil, "bundled", served, filled, false, 9); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "# names de=5 en=3\n") || !strings.Contains(got, "# fallback country=7 state=2\n") {
+		t.Errorf("header counts: %q", got)
+	}
+	out.Reset()
+	if err := printDryRun(&out, nil, nil, "bundled", nil, nil, false, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "# names\n# fallback\n") {
+		t.Errorf("empty counts: %q", got)
+	}
+}
+
 type failedOutput struct{}
 
 func (failedOutput) Write([]byte) (int, error) { return 0, errors.New("output closed") }
 
 func TestDryRunReportsFinalFlushFailure(t *testing.T) {
-	if err := printDryRun(failedOutput{}, nil, nil, "bundled", nil, false, 0); err == nil {
+	if err := printDryRun(failedOutput{}, nil, nil, "bundled", nil, nil, false, 0); err == nil {
 		t.Fatal("small buffered output failure was reported as success")
 	}
 }

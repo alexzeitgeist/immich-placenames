@@ -188,14 +188,15 @@ func TestProfileMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	both := strs(geocode.SourceState, geocode.SourceCountry)
 	cases := map[string]Profile{
-		"CH": {defaultSubtypes, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, ""},
-		"HR": {[]string{"county", "locality"}, TieBreakLargest, f64(0.005), boolp(false), Languages{"primary", "en"}, []string{"county", "region"}, boolp(false), f64(500), nil, nil, ""},
-		"IN": {[]string{"locality", "county"}, TieBreakSmallest, f64(0), boolp(true), Languages{"en", "primary"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, ""},
-		"DE": {[]string{"county", "locality", "localadmin", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, strs(), ""},
-		"FR": {[]string{"localadmin", "locality", "county", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakLargest, f64(0.005), boolp(true), Languages{"de", "en", "primary"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, ""},
-		"GB": {defaultSubtypes, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, "region"},
-		"XX": {defaultSubtypes, TieBreakLargest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, ""},
+		"CH": {defaultSubtypes, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, "", both},
+		"HR": {[]string{"county", "locality"}, TieBreakLargest, f64(0.005), boolp(false), Languages{"primary", "en"}, []string{"county", "region"}, boolp(false), f64(500), nil, nil, "", both},
+		"IN": {[]string{"locality", "county"}, TieBreakSmallest, f64(0), boolp(true), Languages{"en", "primary"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, "", both},
+		"DE": {[]string{"county", "locality", "localadmin", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, strs(), "", both},
+		"FR": {[]string{"localadmin", "locality", "county", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakLargest, f64(0.005), boolp(true), Languages{"de", "en", "primary"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, "", both},
+		"GB": {defaultSubtypes, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, "region", both},
+		"XX": {defaultSubtypes, TieBreakLargest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, "", both},
 	}
 	for code, want := range cases {
 		if got := p.Profile(code); !reflect.DeepEqual(got, want) {
@@ -215,6 +216,7 @@ func TestProfileMerge(t *testing.T) {
 		"state":        `{"countryOverrides": {"HR": {"stateSubtypes": ["regoin"]}}}`,
 		"country from": `{"countryOverrides": {"HR": {"countryFrom": "regoin"}}}`,
 		"blank prefix": `{"defaultProfile": {"rejectNamePrefixes": ["Landkreis ", " "]}}`,
+		"city source":  `{"defaultProfile": {"cityFallback": ["city"]}}`,
 		"key":          `{"countryOverrides": {"HRV": {"airports": false}}}`,
 		"language":     `{"defaultProfile": {"language": "d e"}}`,
 		"languages":    `{"defaultProfile": {"language": ["de", 1]}}`,
@@ -508,7 +510,7 @@ func TestResolveMatchesExplain(t *testing.T) {
 	}{
 		{geocode.Point{}, "Test City"},
 		{geocode.Point{Lon: 0.005}, "Test City"},
-		{geocode.Point{Lon: 0.5}, ""},
+		{geocode.Point{Lon: 0.5}, "Switzerland"}, // out of reach: the country fills the city
 	} {
 		t.Run(fmt.Sprintf("city at %g", c.at.Lon), func(t *testing.T) {
 			dir := t.TempDir()

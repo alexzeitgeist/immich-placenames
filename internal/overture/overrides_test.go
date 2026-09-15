@@ -79,11 +79,12 @@ func TestProviderProfileOverrideIsLastAndIsolated(t *testing.T) {
 	if !reflect.DeepEqual(e.Profile, want) {
 		t.Errorf("effective profile: got %v, want %v", e.Profile, want)
 	}
-	if e.Airport != "" || len(e.Airports) != 0 || e.Result.City != "" || e.Result.State != "" {
+	if e.Airport != "" || len(e.Airports) != 0 || e.City != "" || e.Result.State != "" {
 		t.Errorf("override did not disable airport and nearest selection: explanation=%+v", e)
 	}
-	if got := e.Result.WithFallback(); got.City != "Switzerland" || got.State != "" || got.Country != "Switzerland" || !got.Found {
-		t.Errorf("geocode fallback changed: got %+v", got)
+	if got := e.Result; got.City != "Switzerland" || got.State != "" || got.Country != "Switzerland" || !got.Found ||
+		e.CityFilledFrom != geocode.SourceCountry {
+		t.Errorf("country fallback changed: got %+v from %q", got, e.CityFilledFrom)
 	}
 	if got := e.Profile.String(); got != want.String() || got == base.String() {
 		t.Errorf("profile text: got %q, want %q", got, want.String())
@@ -189,11 +190,8 @@ func TestProviderOverrideFallbackDistanceControlsBothNearestNames(t *testing.T) 
 			if e.City != tc.city || e.State != tc.state {
 				t.Errorf("nearest names: got city=%q state=%q, want city=%q state=%q", e.City, e.State, tc.city, tc.state)
 			}
-			if e.Result.City != tc.city || e.Result.State != tc.state {
-				t.Errorf("result names: got %+v", e.Result)
-			}
-			if got := e.Result.WithFallback(); got.City != tc.fallbackCity || got.State != tc.state || !got.Found {
-				t.Errorf("WithFallback: got %+v", got)
+			if e.Result.City != tc.fallbackCity || e.Result.State != tc.state || !e.Result.Found {
+				t.Errorf("result names: got %+v, want city %q", e.Result, tc.fallbackCity)
 			}
 			if got := *e.Profile.FallbackDistance; got != tc.bound {
 				t.Errorf("effective fallback distance: got %g, want %g", got, tc.bound)

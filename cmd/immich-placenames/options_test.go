@@ -143,12 +143,12 @@ func TestLookupCLIOverrides(t *testing.T) {
 		}
 		var got struct {
 			Profile overture.Profile `json:"profile"`
-			Final   geocode.Result   `json:"final"`
+			Result  geocode.Result   `json:"result"`
 		}
 		if err := json.Unmarshal([]byte(out.String()), &got); err != nil {
 			t.Fatalf("JSON %q: %v", out.String(), err)
 		}
-		if got.Final.City != tc.city || got.Final.State != tc.state || *got.Profile.Airports != tc.airports || *got.Profile.FallbackDistance != tc.distance {
+		if got.Result.City != tc.city || got.Result.State != tc.state || *got.Profile.Airports != tc.airports || *got.Profile.FallbackDistance != tc.distance {
 			t.Fatalf("%v: %+v", args, got)
 		}
 	}
@@ -203,12 +203,12 @@ func TestLookupPointFlags(t *testing.T) {
 				Name   string  `json:"name"`
 				Metres float64 `json:"metres"`
 			} `json:"points"`
-			Final geocode.Result `json:"final"`
+			Result geocode.Result `json:"result"`
 		}
 		if err := json.Unmarshal([]byte(out.String()), &got); err != nil {
 			t.Fatalf("JSON %q: %v", out.String(), err)
 		}
-		if got.Final.City != tc.city || *got.Profile.PointFallback != tc.fallback || *got.Profile.PointDistance != tc.distance {
+		if got.Result.City != tc.city || *got.Profile.PointFallback != tc.fallback || *got.Profile.PointDistance != tc.distance {
 			t.Fatalf("%v: %+v", args, got)
 		}
 		if len(got.Points) != tc.labels {
@@ -234,10 +234,59 @@ func TestPointExplanationDistanceUnits(t *testing.T) {
 			Points:    []overture.Candidate{{Name: "Label", Subtype: "locality", Metres: tc.metres}},
 			Divisions: []overture.Candidate{{Name: "Area", Subtype: "locality", Distance: 0.005}},
 		}
-		printExplanation(&out, e, geocode.Result{})
+		printExplanation(&out, e)
 		if got := out.String(); !strings.Contains(got, "near locality") || !strings.Contains(got, tc.want) || !strings.Contains(got, "dist=0.00500") {
 			t.Errorf("%g metres: wrong distance units in %q", tc.metres, got)
 		}
+	}
+}
+
+func TestExplanationReportsTheCityFallback(t *testing.T) {
+	e := &overture.Explanation{
+		Code: "US", Releases: map[string]string{"divisions/US": "fixture"},
+		Divisions:      []overture.Candidate{{Name: "Florida", Subtype: "region", Contains: true, Decision: "state"}},
+		State:          "Florida",
+		CityFilledFrom: geocode.SourceState,
+		Result:         geocode.Result{City: "Florida", State: "Florida", Country: "United States", Found: true},
+	}
+	var out strings.Builder
+	printExplanation(&out, e)
+	got := out.String()
+	if !strings.Contains(got, "city: -\n") || !strings.Contains(got, "city fallback: state\n") ||
+		!strings.Contains(got, "result: Florida, Florida, United States\n") {
+		t.Errorf("city fallback missing from %q", got)
+	}
+}
+
+func TestExplanationReportsOverrideBeforeFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name, city, source, destination string
+	}{
+		{"renamed", "New City", "", "New City"},
+		{"cleared without fallback", "", "", "-"},
+		{"cleared then state", "Florida", geocode.SourceState, "-"},
+		{"cleared then country", "United States", geocode.SourceCountry, "-"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &overture.Explanation{
+				Code:           "US",
+				City:           "Old City",
+				Overridden:     "Old City",
+				CityFilledFrom: tc.source,
+				Result:         geocode.Result{City: tc.city, State: "Florida", Country: "United States", Found: true},
+			}
+			var out strings.Builder
+			printExplanation(&out, e)
+			got := out.String()
+			want := "override: Old City to " + tc.destination + "\n"
+			if tc.source != "" {
+				want += "city fallback: " + tc.source + "\n"
+			}
+			want += "result: " + tc.city + ", Florida, United States\n"
+			if !strings.Contains(got, want) {
+				t.Errorf("explanation %q does not contain %q", got, want)
+			}
+		})
 	}
 }
 
@@ -249,7 +298,7 @@ func TestExplanationReportsTheReplacedCountry(t *testing.T) {
 		Result:          geocode.Result{City: "Old Town", State: "City of Edinburgh", Country: "Scotland", Found: true},
 	}
 	var out strings.Builder
-	printExplanation(&out, e, e.Result)
+	printExplanation(&out, e)
 	got := out.String()
 	if !strings.Contains(got, "country: United Kingdom to Scotland\n") || !strings.Contains(got, "region") {
 		t.Errorf("replaced country missing from %q", got)

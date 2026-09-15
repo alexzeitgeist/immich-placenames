@@ -229,8 +229,8 @@ func WritePage(ctx context.Context, db Beginner, updates []Update, all, lock boo
 
 // Write sets the names when the asset is still not deleted, its coordinates
 // are still the ones read and, unless all, its city and country are still
-// null. With lock the three column names join "lockedProperties". False means
-// the asset changed meanwhile.
+// null. An empty city or state is stored as NULL. With lock the three column
+// names join "lockedProperties". False means the asset changed meanwhile.
 func Write(ctx context.Context, q Querier, u Update, all, lock bool) (bool, error) {
 	set := `city = $2, state = $3, country = $4`
 	if lock {
@@ -241,15 +241,18 @@ FROM asset a WHERE e."assetId" = a.id AND a.id = $1::uuid AND a."deletedAt" IS N
 	if !all {
 		sql += ` AND e.city IS NULL AND e.country IS NULL`
 	}
-	var state *string
-	if u.State != "" {
-		state = &u.State
-	}
-	tag, err := q.Exec(ctx, sql, u.ID, u.City, state, u.Country, u.Lat, u.Lon)
+	tag, err := q.Exec(ctx, sql, u.ID, nullable(u.City), nullable(u.State), u.Country, u.Lat, u.Lon)
 	if err != nil {
 		return false, err
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+func nullable(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // Selection is the rows a reset touches: a condition over asset_exif e,

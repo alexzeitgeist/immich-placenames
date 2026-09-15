@@ -64,6 +64,7 @@ type Provider struct {
 	airErr     error
 	reported   map[string]bool // cache shortfalls already logged
 	served     map[string]int  // names written, by the language that served them
+	filled     map[string]int  // city fallback counts by source
 	overridden int             // cities rewritten by a profile
 }
 
@@ -74,7 +75,7 @@ func New(dir string, profiles *Profiles, fetch Fetcher, log *slog.Logger) *Provi
 	}
 	return &Provider{Dir: dir, Profiles: profiles, Fetch: fetch, Log: log,
 		div: map[string]*cache.File{}, divErr: map[string]error{}, point: map[string]*cache.File{}, pointErr: map[string]error{},
-		reported: map[string]bool{}, served: map[string]int{}}
+		reported: map[string]bool{}, served: map[string]int{}, filled: map[string]int{}}
 }
 
 // open logs invalid cache files and treats them as absent.
@@ -361,6 +362,9 @@ func (p *Provider) Served() map[string]int { return p.served }
 // Overridden returns the number of city overrides applied.
 func (p *Provider) Overridden() int { return p.overridden }
 
+// Filled returns city fallback counts by source.
+func (p *Provider) Filled() map[string]int { return p.filled }
+
 func (p *Provider) gather(f *cache.File, pt geocode.Point, chain Languages, bound float64) ([]Candidate, error) {
 	var out []Candidate
 	for _, i := range f.Candidates(pt.Lon, pt.Lat) {
@@ -624,11 +628,12 @@ type Explanation struct {
 	Airport         string            `json:"airport"`
 	Overridden      string            `json:"overridden,omitempty"`      // the city name a profile rewrote
 	CountryReplaced string            `json:"countryReplaced,omitempty"` // the country name a profile replaced
+	CityFilledFrom  string            `json:"cityFilledFrom,omitempty"`  // the source that filled an empty city
 	Result          geocode.Result    `json:"result"`
 	Releases        map[string]string `json:"releases"`
 }
 
-// Resolve implements geocode.Resolver. The city fallback is geocode's job.
+// Resolve returns names after city fallback.
 func (p *Provider) Resolve(ctx context.Context, pt geocode.Point) (geocode.Result, error) {
 	e, err := p.compute(ctx, pt, false)
 	if err != nil {
@@ -791,6 +796,22 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 		return nil, err
 	}
 	rejectNames(e.Divisions, e.Profile)
+	// Select before assigning roles: selectors skip candidates with a decision.
+	// A fallback division may also supply the state or country.
+	fallbackDiv, fallbackName := map[string]int{}, map[string]string{}
+	for _, s := range *e.Profile.CityFallback {
+		if s == geocode.SourceState || s == geocode.SourceCountry {
+			continue
+		}
+		list := []string{s}
+		i := selectName(e.Divisions, list, false)
+		if i < 0 {
+			i = selectNearest(e.Divisions, list, bound)
+		}
+		if i >= 0 && e.Divisions[i].Name != "" {
+			fallbackDiv[s], fallbackName[s] = i, e.Divisions[i].Name
+		}
+	}
 	if i := selectCountryDivision(e.Divisions, e.Profile.CountryFrom); i >= 0 {
 		e.CountryReplaced, countryName, countryLang = countryName, e.Divisions[i].Name, e.Divisions[i].Language
 		e.Divisions[i].Decision = "country"
@@ -876,6 +897,18 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 		p.served[cityLang]++
 	}
 	e.Result = geocode.Result{City: city, State: e.State, Country: countryName, Found: true}
+	e.Result, e.CityFilledFrom = e.Result.FillCity(*e.Profile.CityFallback, fallbackName)
+	if e.CityFilledFrom != "" {
+		p.filled[e.CityFilledFrom]++
+		if i, ok := fallbackDiv[e.CityFilledFrom]; ok {
+			if i == si || i == cityI || e.Divisions[i].Decision == "country" {
+				e.Divisions[i].Decision += ", city fallback"
+			} else {
+				e.Divisions[i].Decision = role("city fallback", e.Divisions[i])
+			}
+			p.served[e.Divisions[i].Language]++
+		}
+	}
 	return e, nil
 }
 

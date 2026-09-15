@@ -101,16 +101,16 @@ func TestCityOverrideRewritesTheCity(t *testing.T) {
 		cache.Row{ID: "city", Country: "CH", Name: "Mörtvik", Subtype: "locality", Bbox: unitBox})
 	writeCache(t, AirportsPath(dir), cache.Row{ID: "airport", Name: "Real Airport", Subtype: "airport", Class: "airport", Bbox: unitBox})
 	for _, tc := range []struct {
-		name, profile, city, overridden string
+		name, profile, city, overridden, filledFrom string
 	}{
-		{"no overrides", `{"airports": false}`, "Mörtvik", ""},
-		{"rewrites the city", `{"airports": false, "cityOverrides": [{"from": "mörtvik", "to": "Skogås"}]}`, "Skogås", "Mörtvik"},
-		{"state matches", `{"airports": false, "cityOverrides": [{"from": "Mörtvik", "to": "Skogås", "state": "Real Region"}]}`, "Skogås", "Mörtvik"},
-		{"state differs", `{"airports": false, "cityOverrides": [{"from": "Mörtvik", "to": "Skogås", "state": "Elsewhere"}]}`, "Mörtvik", ""},
-		{"first match wins", `{"airports": false, "cityOverrides": [{"from": "Mörtvik", "to": "First"}, {"from": "Mörtvik", "to": "Second"}]}`, "First", "Mörtvik"},
-		{"clears the city", `{"airports": false, "cityOverrides": [{"from": "Mörtvik", "to": ""}]}`, "", "Mörtvik"},
-		{"rewrites the airport", `{"cityOverrides": [{"from": "Real Airport", "to": "Arlanda"}]}`, "Arlanda", "Real Airport"},
-		{"airport hid the city", `{"cityOverrides": [{"from": "Mörtvik", "to": "Skogås"}]}`, "Real Airport", ""},
+		{"no overrides", `{"airports": false}`, "Mörtvik", "", ""},
+		{"rewrites the city", `{"airports": false, "cityOverrides": [{"from": "mörtvik", "to": "Skogås"}]}`, "Skogås", "Mörtvik", ""},
+		{"state matches", `{"airports": false, "cityOverrides": [{"from": "Mörtvik", "to": "Skogås", "state": "Real Region"}]}`, "Skogås", "Mörtvik", ""},
+		{"state differs", `{"airports": false, "cityOverrides": [{"from": "Mörtvik", "to": "Skogås", "state": "Elsewhere"}]}`, "Mörtvik", "", ""},
+		{"first match wins", `{"airports": false, "cityOverrides": [{"from": "Mörtvik", "to": "First"}, {"from": "Mörtvik", "to": "Second"}]}`, "First", "Mörtvik", ""},
+		{"a cleared city falls back to the state", `{"airports": false, "cityOverrides": [{"from": "Mörtvik", "to": ""}]}`, "Real Region", "Mörtvik", geocode.SourceState},
+		{"rewrites the airport", `{"cityOverrides": [{"from": "Real Airport", "to": "Arlanda"}]}`, "Arlanda", "Real Airport", ""},
+		{"airport hid the city", `{"cityOverrides": [{"from": "Mörtvik", "to": "Skogås"}]}`, "Real Airport", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			profiles, _ := writeProfileCatalog(t, dir, `{"countryOverrides": {"CH": `+tc.profile+`}}`)
@@ -128,8 +128,8 @@ func TestCityOverrideRewritesTheCity(t *testing.T) {
 				t.Errorf("city %q overridden %q count %d; want %q, %q, %d",
 					e.Result.City, e.Overridden, p.Overridden(), tc.city, tc.overridden, count)
 			}
-			if tc.city == "" && e.Result.WithFallback().City != "Real Region" {
-				t.Errorf("cleared city ignores the state fallback: %+v", e.Result.WithFallback())
+			if e.CityFilledFrom != tc.filledFrom {
+				t.Errorf("city filled from %q, want %q", e.CityFilledFrom, tc.filledFrom)
 			}
 		})
 	}

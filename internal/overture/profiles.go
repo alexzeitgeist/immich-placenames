@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/alexzeitgeist/immich-placenames/internal/geocode"
 )
 
 //go:embed profiles.json
@@ -107,6 +109,8 @@ const DefaultPointDistance = 500.0
 
 var defaultSubtypes = []string{"locality", "borough", "localadmin", "macrohood", "neighborhood", "microhood"}
 
+var defaultCityFallback = []string{geocode.SourceState, geocode.SourceCountry}
+
 // defaultStateSubtypes is the state list unless a profile says otherwise.
 var defaultStateSubtypes = []string{"region", "macroregion", "county", "macrocounty", "dependency"}
 
@@ -138,6 +142,9 @@ type Profile struct {
 	// CountryFrom is the division subtype whose name replaces the country.
 	// The code from world.geo still selects the cache and profile.
 	CountryFrom string `json:"countryFrom,omitempty"`
+	// CityFallback lists sources in order: state, country or division subtypes.
+	// Nil inherits; an empty list leaves the city empty.
+	CityFallback *[]string `json:"cityFallback,omitempty"`
 }
 
 // CityOverride replaces a resolved city name, optionally restricted by State.
@@ -161,11 +168,8 @@ type Profiles struct {
 	path    string
 }
 
-// LoadProfiles reads the user catalog at path; an empty path means bundled
-// only. Unknown keys, content after the catalog, override keys that are not
-// alpha-2, unknown subtypes, unknown tie-break modes, negative distances,
-// city overrides without a name to match, empty reject prefixes and
-// malformed languages are errors.
+// LoadProfiles reads and validates the user catalog. An empty path uses
+// only bundled profiles. Unknown fields and invalid settings are errors.
 func LoadProfiles(path string) (*Profiles, error) {
 	p := &Profiles{path: path}
 	if err := decode(bundledJSON, &p.bundled); err != nil {
@@ -230,6 +234,17 @@ func decode(b []byte, c *Catalog) error {
 		}
 		if err := subtypes(name, "countryFrom", []string{p.CountryFrom}); err != nil {
 			return err
+		}
+		if p.CityFallback != nil {
+			for i, s := range *p.CityFallback {
+				switch t := strings.ToLower(strings.TrimSpace(s)); t {
+				case geocode.SourceState, geocode.SourceCountry:
+				default:
+					if !slices.Contains(divisionSubtypes, t) {
+						return fmt.Errorf("%s: cityFallback[%d] %q is not %s, %s or a division subtype", name, i, s, geocode.SourceState, geocode.SourceCountry)
+					}
+				}
+			}
 		}
 		return checkLanguages(name, p.Language)
 	}
@@ -307,14 +322,18 @@ func (p Profile) apply(o Profile) Profile {
 	if strings.TrimSpace(o.CountryFrom) != "" {
 		p.CountryFrom = o.CountryFrom
 	}
+	if o.CityFallback != nil {
+		list := slices.Clone(*o.CityFallback)
+		p.CityFallback = &list
+	}
 	return p
 }
 
 // normalize cleans subtype lists, canonicalizes the tie-break mode,
 // completes the language chain and fills missing defaults.
 func (p Profile) normalize() Profile {
-	p.PreferredSubtypes = normalizeSubtypes(p.PreferredSubtypes, defaultSubtypes)
-	p.StateSubtypes = normalizeSubtypes(p.StateSubtypes, defaultStateSubtypes)
+	p.PreferredSubtypes = normalizeList(p.PreferredSubtypes, defaultSubtypes)
+	p.StateSubtypes = normalizeList(p.StateSubtypes, defaultStateSubtypes)
 	if strings.EqualFold(strings.TrimSpace(p.TieBreakMode), TieBreakLargest) {
 		p.TieBreakMode = TieBreakLargest
 	} else {
@@ -343,6 +362,12 @@ func (p Profile) normalize() Profile {
 		p.RejectNamePrefixes = &list
 	}
 	p.CountryFrom = strings.ToLower(strings.TrimSpace(p.CountryFrom))
+	sources := defaultCityFallback
+	if p.CityFallback != nil {
+		sources = *p.CityFallback
+	}
+	sources = normalizeList(sources, nil)
+	p.CityFallback = &sources
 	return p
 }
 
@@ -410,15 +435,17 @@ func hasPrefixFold(name, prefix string) bool {
 	return strings.EqualFold(name[:end], prefix)
 }
 
-func normalizeSubtypes(list, def []string) []string {
-	var out []string
+// normalizeList trims and lowercases entries, removes blanks and duplicates,
+// and uses def if the result is empty. It returns a non-nil slice.
+func normalizeList(list, def []string) []string {
+	out := []string{}
 	for _, s := range list {
 		s = strings.ToLower(strings.TrimSpace(s))
 		if s != "" && !slices.Contains(out, s) {
 			out = append(out, s)
 		}
 	}
-	if len(out) == 0 {
+	if len(out) == 0 && len(def) > 0 {
 		return slices.Clone(def)
 	}
 	return out
@@ -492,6 +519,9 @@ func (p Profile) String() string {
 	}
 	if p.RejectNamePrefixes != nil && len(*p.RejectNamePrefixes) > 0 {
 		s += fmt.Sprintf(" reject=%q", *p.RejectNamePrefixes)
+	}
+	if p.CityFallback != nil && !slices.Equal(*p.CityFallback, defaultCityFallback) {
+		s += " cityFallback=[" + strings.Join(*p.CityFallback, " ") + "]"
 	}
 	return s
 }

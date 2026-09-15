@@ -123,7 +123,7 @@ func checkNames(t *testing.T, p *Provider, samples []sample) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := res.WithFallback()
+			got := res
 			if !got.Found || got.City != s.city || got.State != s.state || got.Country != s.country {
 				t.Errorf("got %+v; want %q, %q, %q", got, s.city, s.state, s.country)
 			}
@@ -202,8 +202,8 @@ func TestSeaFallback(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !res.Found || res.City != "" || res.WithFallback().City != s.state {
-				t.Fatalf("fallback disabled: got %+v; want empty city falling back to state", res)
+			if !res.Found || res.City != s.state {
+				t.Fatalf("nearest division disabled: got %+v; want the state filling the city", res)
 			}
 		})
 	}

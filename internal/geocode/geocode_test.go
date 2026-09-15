@@ -45,8 +45,8 @@ func TestResolveAll(t *testing.T) {
 	if err != nil || len(out) != 5 {
 		t.Fatalf("outcomes %d err %v", len(out), err)
 	}
-	if o := out[0]; o.Err != nil || o.Result.City != "State" || !o.Result.Writable() {
-		t.Errorf("resolved without city: fallback expected, got %+v", o)
+	if o := out[0]; o.Err != nil || o.Result.City != "" || !o.Result.Writable() {
+		t.Errorf("resolver answer altered: the city fallback is the resolver's, got %+v", o)
 	}
 	if o := out[1]; o.Err != nil || o.Result.Found || o.Result.City != "" || o.Result.Writable() {
 		t.Errorf("no match must stay empty, got %+v", o)
@@ -71,14 +71,36 @@ func TestResolveAllCancelled(t *testing.T) {
 	}
 }
 
-func TestWithFallback(t *testing.T) {
-	if r := (Result{Country: "C", Found: true}).WithFallback(); r.City != "C" {
-		t.Errorf("country fallback, got %+v", r)
-	}
-	if r := (Result{State: "S", Country: "C", Found: true}).WithFallback(); r.City != "S" {
-		t.Errorf("state fallback, got %+v", r)
-	}
-	if r := (Result{State: "S", Country: "C"}).WithFallback(); r.City != "" {
-		t.Errorf("not found must not receive a fallback, got %+v", r)
+func TestFillCity(t *testing.T) {
+	both := []string{SourceState, SourceCountry}
+	county := map[string]string{"county": "County"}
+	for _, tc := range []struct {
+		name       string
+		in         Result
+		sources    []string
+		extra      map[string]string
+		city, from string
+	}{
+		{"state before country", Result{State: "S", Country: "C", Found: true}, both, nil, "S", SourceState},
+		{"country when the state is empty", Result{Country: "C", Found: true}, both, nil, "C", SourceCountry},
+		{"country alone", Result{State: "S", Country: "C", Found: true}, []string{SourceCountry}, nil, "C", SourceCountry},
+		{"listed order", Result{State: "S", Country: "C", Found: true}, []string{SourceCountry, SourceState}, nil, "C", SourceCountry},
+		{"no sources", Result{State: "S", Country: "C", Found: true}, nil, nil, "", ""},
+		{"city kept", Result{City: "City", State: "S", Country: "C", Found: true}, both, county, "City", ""},
+		{"nothing to fill from", Result{Found: true}, both, nil, "", ""},
+		{"not found", Result{State: "S", Country: "C"}, both, county, "", ""},
+		{"a source of the resolver's own", Result{State: "S", Country: "C", Found: true}, []string{"county", SourceState}, county, "County", "county"},
+		{"an unsupplied source is skipped", Result{State: "S", Country: "C", Found: true}, []string{"borough", SourceState}, county, "S", SourceState},
+		{"state and country are never taken from extra", Result{Found: true}, both, map[string]string{SourceState: "X"}, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, from := tc.in.FillCity(tc.sources, tc.extra)
+			if got.City != tc.city || from != tc.from {
+				t.Errorf("city %q from %q; want %q from %q", got.City, from, tc.city, tc.from)
+			}
+			if got.State != tc.in.State || got.Country != tc.in.Country || got.Found != tc.in.Found {
+				t.Errorf("state, country or match changed: %+v", got)
+			}
+		})
 	}
 }
