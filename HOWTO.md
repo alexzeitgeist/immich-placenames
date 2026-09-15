@@ -192,7 +192,7 @@ Reset includes trashed assets. Normal runs exclude them until restored. To repla
 
 ## Caches and refreshes
 
-`lookup` and `run`, including dry runs, fetch missing caches. They use the release recorded in `world.geo`. Existing caches are not refreshed automatically.
+`lookup` and `run`, including dry runs, fetch missing caches at the release recorded in `world.geo`. They and country-division fetches rebuild world caches lacking dependency territories (about 1.8 GB). Failed downloads keep the old file; the next invocation that needs it retries.
 
 To prefetch a known release:
 
@@ -201,6 +201,8 @@ To prefetch a known release:
 ```
 
 Replace HR/CH with the countries you need. Without `-release`, `fetch` selects the latest release from Overture's catalog, which may differ from your existing caches.
+
+`-release` applies to the requested caches. Automatic world migration keeps its recorded release; include `world` in the fetch targets to change it.
 
 To refresh, pause the timer and fetch world, airports and all required countries at the same release. Check `status` and a dry run before resuming. Use the same procedure after a cache-format change; invalid caches are treated as missing and rebuilt.
 
@@ -221,7 +223,8 @@ Exit codes are 0 for success, 2 for usage errors and 1 for operational failures.
 | `mixed cache releases` | Refetch the required caches with the same `-release` |
 | `cache invalid, treated as absent` | Refetch the damaged or incompatible cache |
 | `cache has no ..., falling back; refetch it` | Refetch for the missing name languages |
-| `no country` | Inspect the coordinates; points outside all country polygons remain unnamed |
+| `no country` | Inspect the coordinates; points outside all country and dependency polygons remain unnamed |
+| `refetch failed, keeping the country polygons ...` | Retry the command or fetch `world` again |
 | `changed meanwhile` | An asset changed before its write; a later run may select it again |
 | `N assets failed` | Check the per-asset errors; other assets may have been written |
 | `stopped after N confirmed writes in P committed pages` | Earlier commits remain; inspect the failure before rerunning |

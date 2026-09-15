@@ -15,6 +15,9 @@ We checked the expected names against that release's boundaries and resolver res
 | Vienna, Ubud, Miami Beach, Fort Lauderdale, Westwood | District and locality selection |
 | Lapad and Cavtat water | Country/state at sea, nearest-city distance limit, state fallback with distance zero |
 | Lapad language test | Croatian primary names and German translations |
+| Dependency territories | Country selection across 105 polygons and 53 codes |
+
+Generated dependency points use the resolver's edge tolerance. Thirteen named places use coordinates chosen by hand.
 
 ## Run
 
@@ -26,6 +29,13 @@ REVERSEGEO_DATA="$PWD/data" go test ./internal/overture -run 'TestOracle|TestSea
 ```
 
 You need `world.geo`, `airports.geo` and `divisions/{AT,CH,DE,HR,ID,IN,US}.geo`, all from the release above. The HR cache must include primary names and German translations. Git ignores the caches.
+
+Dependency tests need only `world.geo`:
+
+```sh
+go run ./cmd/immich-placenames fetch -data ./data -release 2026-08-19.0 world
+REVERSEGEO_DATA="$PWD/data" go test ./internal/overture -run TestOracleDependenc -count=1
+```
 
 Without `REVERSEGEO_DATA`, these tests skip. Once you set it, missing, corrupt or wrong-release caches cause failures. No Immich database is needed. Run the synthetic unit tests with `go test ./...`.
 

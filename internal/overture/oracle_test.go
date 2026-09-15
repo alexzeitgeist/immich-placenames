@@ -71,6 +71,14 @@ func oracleCachePaths(dir string) []string {
 // never read. A nil Fetcher prevents all on-demand downloads.
 func oracleDataDir(t *testing.T) string {
 	t.Helper()
+	dir := oracleRoot(t)
+	checkRelease(t, oracleCachePaths(dir)...)
+	return dir
+}
+
+// oracleRoot skips the test unless REVERSEGEO_DATA is set.
+func oracleRoot(t *testing.T) string {
+	t.Helper()
 	dir := os.Getenv("REVERSEGEO_DATA")
 	if dir == "" {
 		t.Skip("REVERSEGEO_DATA not set")
@@ -79,7 +87,12 @@ func oracleDataDir(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range oracleCachePaths(dir) {
+	return dir
+}
+
+func checkRelease(t *testing.T, paths ...string) {
+	t.Helper()
+	for _, path := range paths {
 		f, err := cache.Open(path)
 		if err != nil {
 			t.Fatalf("oracle cache %s: %v", path, err)
@@ -90,7 +103,6 @@ func oracleDataDir(t *testing.T) string {
 			t.Fatalf("%s: release %q, want %s", path, release, oracleRelease)
 		}
 	}
-	return dir
 }
 
 func openData(t *testing.T) *Provider {

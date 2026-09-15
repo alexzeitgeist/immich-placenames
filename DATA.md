@@ -4,9 +4,11 @@ immich-placenames downloads geographic boundaries from Overture Maps and caches 
 
 | Cache | Overture source | Used for |
 |---|---|---|
-| `world.geo` | Divisions / division_area, subtype country | Country and its two-letter code |
+| `world.geo` | Divisions / division_area, subtypes country and dependency | Country and its two-letter code |
 | `divisions/CC.geo` | Divisions / division_area, filtered by country | State and city |
 | `airports.geo` | Base / infrastructure, subtype airport | Airport name in place of the city |
+
+`world.geo` includes 53 dependency territories, such as Hong Kong, Greenland and Réunion, under their own country codes.
 
 World and country caches include boundaries on land and at sea. These can provide names for photos taken off the coast, outside the land boundary.
 
@@ -16,11 +18,11 @@ Use [profiles](HOWTO.md#profiles) to choose boundary types and the order of pref
 
 ## Download costs
 
-We measured these fetches with release `2026-08-19.0` and four fetch workers. World and US downloads ran on a workstation; the airport download ran on a VM. Your timings will depend on hardware and network speed.
+Measured with release `2026-08-19.0` and four workers. World and US used different machines; airports used a VM. Transfer, time and memory vary by setup and retries.
 
 | Fetch | Rows kept | Cache size | Data read | Time | Peak RSS |
 |---|---|---|---|---|---|
-| World | 378 | 164 MB | 1,653 MB | 1m47s | 588 MB |
+| World | 483 | 168 MB | 1,771 MB | 1m50s | 711 MB |
 | Airports | 46,064 | 24 MB | 13,371 MB | 22m24s | 541 MB |
 | US divisions | 59,770 | 236 MB | 356 MB | 26s | 288 MB |
 
@@ -31,6 +33,8 @@ The download can be much larger than the cache. Overture stores the data in Parq
 ## Releases and cache files
 
 Each cache records which Overture release it came from. By default, `fetch` uses the latest release in the [Overture catalog](https://stac.overturemaps.org/catalog.json). Use `-release` to choose one explicitly. When `lookup` or `run` downloads missing country or airport data, it uses the release recorded in `world.geo`.
+
+`lookup`, `run` and country-division fetches rebuild world caches lacking dependency territories at their recorded release (about 1.8 GB). Failed downloads keep the old file; the next invocation that needs it retries.
 
 Caches stay on disk between runs. A new Overture release won't trigger an automatic refresh. Use `status` to check cache releases; `run` warns if it opens caches from different releases. When refreshing, use the same release for all caches in the data directory.
 

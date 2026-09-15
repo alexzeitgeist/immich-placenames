@@ -6,6 +6,7 @@ import (
 	"flag"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/alexzeitgeist/immich-placenames/internal/cache"
+	"github.com/alexzeitgeist/immich-placenames/internal/geo"
 	"github.com/alexzeitgeist/immich-placenames/internal/overture"
 	"github.com/alexzeitgeist/immich-placenames/internal/overture/fetch"
 )
@@ -21,13 +23,7 @@ import (
 // explicit release wins.
 func TestReleaseFollowsWorld(t *testing.T) {
 	dir := t.TempDir()
-	w, err := cache.NewWriter(overture.WorldPath(dir), cache.Header{Kind: "world", Release: "2026-01-01.0"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
+	writeWorld(t, dir, cache.Header{Kind: "world", Release: "2026-01-01.0"})
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	f := &fetcher{c: &fetch.Client{}, world: overture.WorldPath(dir), log: log}
 	if r, err := f.Release(context.Background()); err != nil || r != "2026-01-01.0" {
@@ -36,6 +32,68 @@ func TestReleaseFollowsWorld(t *testing.T) {
 	f = &fetcher{c: &fetch.Client{}, release: "2026-02-02.0", world: overture.WorldPath(dir), log: log}
 	if r, err := f.Release(context.Background()); err != nil || r != "2026-02-02.0" {
 		t.Fatalf("explicit release: got %q, %v", r, err)
+	}
+}
+
+type releaseTransport func(*http.Request) (*http.Response, error)
+
+func (f releaseTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Migrating world must not use or change the requested divisions release.
+func TestWorldMigrationPreservesRelease(t *testing.T) {
+	for _, requested := range []string{"2026-09-16.0", "latest"} {
+		t.Run(requested, func(t *testing.T) {
+			dir := t.TempDir()
+			const oldRelease = "2026-08-19.0"
+			const divisionsRelease = "2026-09-16.0"
+			writeWorld(t, dir, cache.Header{Kind: "world", Release: oldRelease})
+			var prefixes []string
+			client := &http.Client{Transport: releaseTransport(func(r *http.Request) (*http.Response, error) {
+				body := "<ListBucketResult/>"
+				if r.URL.String() == fetch.CatalogURL {
+					body = `{"latest":"` + divisionsRelease + `"}`
+				} else {
+					prefixes = append(prefixes, r.URL.Query().Get("prefix"))
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+					Body: io.NopCloser(strings.NewReader(body))}, nil
+			})}
+			log := slog.New(slog.NewTextHandler(io.Discard, nil))
+			f := &fetcher{c: &fetch.Client{HTTP: client, Log: log}, release: requested,
+				world: overture.WorldPath(dir), log: log}
+			p := overture.New(dir, nil, f, log)
+			defer p.Close()
+			ctx := context.Background()
+			if _, err := p.CountryBbox(ctx, "CH"); err != nil {
+				t.Fatal(err)
+			}
+			if f.resolved != "" || f.release != requested {
+				t.Fatalf("migration changed requested release: %+v", f)
+			}
+			if err := f.Divisions(ctx, "CH", geo.Bbox{}, overture.DivisionsPath(dir, "CH")); err == nil || !strings.Contains(err.Error(), "no parquet files") {
+				t.Fatalf("empty divisions fetch: %v", err)
+			}
+			want := []string{"release/" + oldRelease + "/theme=divisions/type=division_area/",
+				"release/" + divisionsRelease + "/theme=divisions/type=division_area/"}
+			if !reflect.DeepEqual(prefixes, want) {
+				t.Fatalf("requested prefixes %v, want %v", prefixes, want)
+			}
+		})
+	}
+}
+
+func writeWorld(t *testing.T, dir string, hdr cache.Header) {
+	t.Helper()
+	w, err := cache.NewWriter(overture.WorldPath(dir), hdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Add(cache.Row{ID: "c", Country: "CH", Name: "Switzerland", Subtype: "country"}, []byte{0}); err != nil {
+		w.Abort()
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -174,19 +232,13 @@ func TestInvalidInputRejected(t *testing.T) {
 // status reads the directory given and names the profile source.
 func TestStatusOptions(t *testing.T) {
 	dir := t.TempDir()
-	w, err := cache.NewWriter(overture.WorldPath(dir), cache.Header{Kind: "world", Release: "2026-01-01.0"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
+	writeWorld(t, dir, cache.Header{Kind: "world", Release: "2026-01-01.0"})
 	t.Setenv("DB_USERNAME", "")
 	var out strings.Builder
 	a := quiet("data")
 	a.out = &out
-	err = a.call("status", "-data", dir)
-	if err == nil || !strings.Contains(err.Error(), "DB_USERNAME") || !strings.Contains(out.String(), "world.geo          release 2026-01-01.0 rows 0") || !strings.Contains(out.String(), "\nprofiles bundled\n  default  [locality borough localadmin macrohood neighborhood microhood] smallest-area state=[region macroregion county macrocounty dependency] fallback=0.01") || !strings.Contains(out.String(), "\n  DE       [county") {
+	err := a.call("status", "-data", dir)
+	if err == nil || !strings.Contains(err.Error(), "DB_USERNAME") || !strings.Contains(out.String(), "world.geo          release 2026-01-01.0 rows 1") || !strings.Contains(out.String(), "names en without dependency territories") || !strings.Contains(out.String(), "\nprofiles bundled\n  default  [locality borough localadmin macrohood neighborhood microhood] smallest-area state=[region macroregion county macrocounty dependency] fallback=0.01") || !strings.Contains(out.String(), "\n  DE       [county") {
 		t.Errorf("status -data: %v; printed %q", err, out.String())
 	}
 }

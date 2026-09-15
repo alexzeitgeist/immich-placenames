@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -223,13 +224,19 @@ func writeCache(t *testing.T, path string, rows ...cache.Row) {
 }
 
 // writeCacheAt writes rows that all carry a WKB point geometry at the point.
+// Dependencies prevents automatic refetching in tests.
 func writeCacheAt(t *testing.T, path string, at geocode.Point, rows ...cache.Row) {
+	t.Helper()
+	writeCacheHeader(t, path, cache.Header{Kind: "test", Code: "CH", Dependencies: true}, at, rows...)
+}
+
+func writeCacheHeader(t *testing.T, path string, hdr cache.Header, at geocode.Point, rows ...cache.Row) {
 	t.Helper()
 	point := make([]byte, 21) // little-endian WKB point
 	point[0], point[1] = 1, 1
 	binary.LittleEndian.PutUint64(point[5:], math.Float64bits(at.Lon))
 	binary.LittleEndian.PutUint64(point[13:], math.Float64bits(at.Lat))
-	w, err := cache.NewWriter(path, cache.Header{Kind: "test", Code: "CH"})
+	w, err := cache.NewWriter(path, hdr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +279,7 @@ func TestAirportsOffByProfile(t *testing.T) {
 func TestStateByProfile(t *testing.T) {
 	dir := t.TempDir()
 	writeCache(t, WorldPath(dir), cache.Row{ID: "c", Country: "CH", Name: "Switzerland", Subtype: "country", Bbox: unitBox})
-	writeCache(t, AirportsPath(dir))
+	writeCache(t, AirportsPath(dir), cache.Row{ID: "a", Name: "Far Airport", Subtype: "airport", Class: "airport", Bbox: geo.Bbox{XMin: 10, YMin: 10, XMax: 11, YMax: 11}})
 	user := filepath.Join(dir, "profiles.json")
 	os.WriteFile(user, []byte(`{"countryOverrides": {"CH": {"stateSubtypes": ["county"]}}}`), 0o644)
 	for _, at := range []geocode.Point{{}, {Lon: 0.005}} {
@@ -301,7 +308,9 @@ type airportFetcher struct {
 	calls int
 }
 
-func (f *airportFetcher) World(context.Context, string) error { return errors.New("world fetched") }
+func (f *airportFetcher) World(context.Context, string, string) error {
+	return errors.New("world fetched")
+}
 func (f *airportFetcher) Divisions(context.Context, string, geo.Bbox, string) error {
 	return errors.New("divisions fetched")
 }
@@ -368,5 +377,106 @@ func TestNearestFallbackWithinBound(t *testing.T) {
 	cs = []Candidate{cand("locality", "Far", 0.01, dist(0.02)), cand("locality", "Inside", 0.01)}
 	if selectNearest(cs, defaultSubtypes, DefaultFallbackDistance) != -1 {
 		t.Error("beyond the bound or containing candidate selected")
+	}
+}
+
+type worldFetcher struct {
+	t          *testing.T
+	fail       bool
+	worlds     int
+	release    string
+	divisions  int
+	noDivision bool
+}
+
+func (f *worldFetcher) World(_ context.Context, release, dest string) error {
+	f.worlds++
+	f.release = release
+	if f.fail {
+		return errors.New("offline")
+	}
+	writeCache(f.t, dest,
+		cache.Row{ID: "cn", Country: "CN", Name: "China", Subtype: "country", Bbox: unitBox},
+		cache.Row{ID: "hk", Country: "HK", Name: "Hong Kong", Subtype: "dependency", Bbox: geo.Bbox{XMin: -0.5, YMin: -0.5, XMax: 0.5, YMax: 0.5}})
+	return nil
+}
+
+func (f *worldFetcher) Divisions(_ context.Context, code string, _ geo.Bbox, dest string) error {
+	f.divisions++
+	if f.noDivision {
+		return fmt.Errorf("%s: %w", dest, cache.ErrNoRows)
+	}
+	writeCache(f.t, dest, cache.Row{ID: "l", Country: code, Name: "Real City", Subtype: "locality", Bbox: unitBox})
+	return nil
+}
+
+func (f *worldFetcher) Airports(context.Context, string) error { return errors.New("airports fetched") }
+
+// Migration runs once per provider; failed or disabled fetches keep the old cache.
+func TestWorldRefetchedForDependencies(t *testing.T) {
+	profiles, err := LoadProfiles("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name    string
+		fetch   bool
+		fail    bool
+		country string
+		worlds  int
+	}{
+		{"refetched", true, false, "Hong Kong", 1},
+		{"refetch failed", true, true, "China", 1},
+		{"no fetcher", false, false, "China", 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeCacheHeader(t, WorldPath(dir), cache.Header{Kind: "world", Release: "2026-08-19.0"}, geocode.Point{},
+				cache.Row{ID: "cn", Country: "CN", Name: "China", Subtype: "country", Bbox: unitBox})
+			writeCache(t, DivisionsPath(dir, "CN"), cache.Row{ID: "l", Country: "CN", Name: "Real City", Subtype: "locality", Bbox: unitBox})
+			writeCache(t, DivisionsPath(dir, "HK"), cache.Row{ID: "l", Country: "HK", Name: "Real City", Subtype: "locality", Bbox: unitBox})
+			f := &worldFetcher{t: t, fail: c.fail}
+			var fetcher Fetcher
+			if c.fetch {
+				fetcher = f
+			}
+			p := New(dir, profiles, fetcher, nil)
+			p.Overrides.Airports = boolp(false)
+			defer p.Close()
+			res, err := p.Resolve(context.Background(), geocode.Point{})
+			again, errAgain := p.Resolve(context.Background(), geocode.Point{})
+			if err != nil || errAgain != nil {
+				t.Fatalf("resolve: %v, %v", err, errAgain)
+			}
+			if c.fetch && f.release != "2026-08-19.0" {
+				t.Errorf("migration release %q, want 2026-08-19.0", f.release)
+			}
+			if res.Country != c.country || again.Country != c.country || f.worlds != c.worlds {
+				t.Errorf("country %q then %q after %d fetches; want %q after %d", res.Country, again.Country, f.worlds, c.country, c.worlds)
+			}
+		})
+	}
+}
+
+// An empty divisions fetch fails the asset and is not retried in this pass.
+func TestEmptyDivisionsFailsResolution(t *testing.T) {
+	dir := t.TempDir()
+	writeCache(t, WorldPath(dir), cache.Row{ID: "bv", Country: "BV", Name: "Bouvet Island", Subtype: "dependency", Bbox: unitBox})
+	profiles, err := LoadProfiles("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &worldFetcher{t: t, noDivision: true}
+	p := New(dir, profiles, f, nil)
+	p.Overrides.Airports = boolp(false)
+	defer p.Close()
+	for range 2 {
+		res, err := p.Resolve(context.Background(), geocode.Point{})
+		if !errors.Is(err, cache.ErrNoRows) || res != (geocode.Result{}) {
+			t.Fatalf("got %+v, %v; want ErrNoRows and no result", res, err)
+		}
+	}
+	if f.divisions != 1 {
+		t.Fatalf("fetched divisions %d times, want 1", f.divisions)
 	}
 }

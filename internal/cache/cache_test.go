@@ -185,3 +185,51 @@ func TestConcurrentWritersSameDest(t *testing.T) {
 		t.Errorf("temporary files left: %v", left)
 	}
 }
+
+func TestEmptyWriterKeepsPreviousFile(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "divisions", "HR.geo")
+	write(t, dest)
+	w, err := NewWriter(dest, Header{Kind: "divisions", Code: "HR", Release: "2026-09-16.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); !errors.Is(err, ErrNoRows) {
+		t.Fatalf("Close of an empty writer: %v, want ErrNoRows", err)
+	}
+	f, err := Open(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if f.Header.Release != "2026-08-19.0" || len(f.Rows) != len(rows) {
+		t.Errorf("previous file replaced: header %+v, %d rows", f.Header, len(f.Rows))
+	}
+	if left, _ := filepath.Glob(dest + ".tmp-*"); len(left) != 0 {
+		t.Errorf("temporary files left: %v", left)
+	}
+}
+
+func TestHeaderDependencies(t *testing.T) {
+	for _, want := range []bool{false, true} {
+		dest := filepath.Join(t.TempDir(), "world.geo")
+		w, err := NewWriter(dest, Header{Kind: "world", Release: "2026-08-19.0", Dependencies: want})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Add(rows[0], wkbPoint(2, 3)); err != nil {
+			w.Abort()
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		f, err := Open(dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.Header.Dependencies != want {
+			t.Errorf("Dependencies %v, want %v", f.Header.Dependencies, want)
+		}
+		f.Close()
+	}
+}

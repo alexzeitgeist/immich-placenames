@@ -37,7 +37,7 @@ sudo docker compose run --rm --no-deps immich-placenames status -data /data
 sudo docker compose run --rm --no-deps immich-placenames run -data /data -dry-run
 ```
 
-Replace HR/CH with the countries in your library. With release `2026-08-19.0`, the airport download read about 13.4 GB and world boundaries about 1.65 GB. A dry run can download missing caches too. Later runs reuse them.
+Replace HR/CH with the countries in your library. With release `2026-08-19.0`, the airport download read about 13.4 GB and world boundaries about 1.8 GB. A dry run can download missing caches too. Later runs reuse them.
 
 Review the dry-run output, then repeat the command without `-dry-run` to write the names. By default, the tool selects assets whose city and country are both null. Add `-all` to include already-named assets.
 

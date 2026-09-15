@@ -110,11 +110,13 @@ func (c *Client) LatestRelease(ctx context.Context) (string, error) {
 	return cat.Latest, nil
 }
 
-// World writes every subtype=country row into dest.
+var worldSubtypes = []string{"country", "dependency"}
+
+// World writes every country and dependency row into dest.
 func (c *Client) World(ctx context.Context, release, dest string) (int, error) {
-	hdr := cache.Header{Kind: "world", Release: release, Fetched: time.Now().UTC()}
-	return c.divisions(ctx, release, "subtype", "country", nil, hdr, dest, func(r *record) bool {
-		return r.subtype == "country"
+	hdr := cache.Header{Kind: "world", Release: release, Fetched: time.Now().UTC(), Dependencies: true}
+	return c.divisions(ctx, release, "subtype", worldSubtypes, nil, hdr, dest, func(r *record) bool {
+		return slices.Contains(worldSubtypes, r.subtype)
 	})
 }
 
@@ -122,7 +124,7 @@ func (c *Client) World(ctx context.Context, release, dest string) (int, error) {
 // admitting row groups by the country's bbox.
 func (c *Client) Divisions(ctx context.Context, release, code string, box geo.Bbox, dest string) (int, error) {
 	hdr := cache.Header{Kind: "divisions", Code: code, Release: release, Fetched: time.Now().UTC()}
-	return c.divisions(ctx, release, "country", code, &box, hdr, dest, func(r *record) bool {
+	return c.divisions(ctx, release, "country", []string{code}, &box, hdr, dest, func(r *record) bool {
 		return r.country == code
 	})
 }
@@ -131,7 +133,7 @@ func (c *Client) Divisions(ctx context.Context, release, code string, box geo.Bb
 // country, and a country's bbox can span the globe, so the file is global.
 func (c *Client) Airports(ctx context.Context, release, dest string) (int, error) {
 	hdr := cache.Header{Kind: "airports", Release: release, Fetched: time.Now().UTC()}
-	refs, err := c.plan(ctx, release, infraPrefix, "subtype", "airport", nil)
+	refs, err := c.plan(ctx, release, infraPrefix, "subtype", []string{"airport"}, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -148,8 +150,8 @@ func (c *Client) Airports(ctx context.Context, release, dest string) (int, error
 	})
 }
 
-func (c *Client) divisions(ctx context.Context, release, filterCol, filterVal string, box *geo.Bbox, hdr cache.Header, dest string, keep func(*record) bool) (int, error) {
-	refs, err := c.plan(ctx, release, divisionsPrefix, filterCol, filterVal, box)
+func (c *Client) divisions(ctx context.Context, release, filterCol string, filterVals []string, box *geo.Bbox, hdr cache.Header, dest string, keep func(*record) bool) (int, error) {
+	refs, err := c.plan(ctx, release, divisionsPrefix, filterCol, filterVals, box)
 	if err != nil {
 		return 0, err
 	}
@@ -196,12 +198,8 @@ func (c *Client) build(ctx context.Context, refs []groupRef, hdr cache.Header, d
 		w.Abort()
 		return 0, err
 	}
-	if w.Count() == 0 {
-		w.Abort()
-		return 0, fmt.Errorf("%s %s: no rows in release %s; previous file kept", hdr.Kind, hdr.Code, hdr.Release)
-	}
 	if err := w.Close(); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%s from release %s: %w", dest, hdr.Release, err)
 	}
 	c.log().Info("cache written", "path", dest, "rows", w.Count(), "mb", c.bytes.Load()/1e6, "requests", c.requests.Load(), "took", time.Since(start).Round(time.Second))
 	return w.Count(), nil
@@ -366,7 +364,7 @@ type groupRef struct {
 
 // plan lists the files, reads their footers and admits row groups: bbox
 // statistics overlap, then the filter column's min and max, then its values.
-func (c *Client) plan(ctx context.Context, release, prefix, filterCol, filterVal string, box *geo.Bbox) ([]groupRef, error) {
+func (c *Client) plan(ctx context.Context, release, prefix, filterCol string, filterVals []string, box *geo.Bbox) ([]groupRef, error) {
 	start := time.Now()
 	c.requests.Store(0)
 	c.bytes.Store(0)
@@ -389,7 +387,7 @@ func (c *Client) plan(ctx context.Context, release, prefix, filterCol, filterVal
 		if err != nil {
 			return fmt.Errorf("%s: %w", obj.Key, err)
 		}
-		admitted, err := c.admit(pf, rr, filterCol, filterVal, box)
+		admitted, err := c.admit(pf, rr, filterCol, filterVals, box)
 		if err != nil {
 			return fmt.Errorf("%s: %w", obj.Key, err)
 		}
@@ -420,12 +418,13 @@ func (c *Client) plan(ctx context.Context, release, prefix, filterCol, filterVal
 		_, n := groupSpan(&r.pf.Metadata().RowGroups[r.index])
 		admittedBytes += n
 	}
-	c.log().Info("row groups admitted", "prefix", prefix, "filter", filterCol+"="+filterVal, "files", len(objs), "groups", groups, "rows", rows,
+	c.log().Info("row groups admitted", "prefix", prefix, "filter", filterCol+"="+strings.Join(filterVals, ","), "files", len(objs), "groups", groups, "rows", rows,
 		"admitted", len(refs), "mb", admittedBytes/1e6, "probe_mb", c.bytes.Load()/1e6, "requests", c.requests.Load(), "took", time.Since(start).Round(time.Second))
 	return refs, nil
 }
 
-func (c *Client) admit(pf *parquet.File, rr *rangeReader, filterCol, filterVal string, box *geo.Bbox) ([]int, error) {
+// admit returns the row groups holding any of the wanted filter values.
+func (c *Client) admit(pf *parquet.File, rr *rangeReader, filterCol string, filterVals []string, box *geo.Bbox) ([]int, error) {
 	leaves := pf.Schema().Columns()
 	index := func(path string) int {
 		for i, p := range leaves {
@@ -460,14 +459,15 @@ func (c *Client) admit(pf *parquet.File, rr *rangeReader, filterCol, filterVal s
 			}
 		}
 		st := &rg.Columns[fi].MetaData.Statistics
-		if lo, hi := string(minStat(st)), string(maxStat(st)); lo != "" && (filterVal < lo || filterVal > hi) {
+		lo, hi := string(minStat(st)), string(maxStat(st))
+		if lo != "" && !slices.ContainsFunc(filterVals, func(v string) bool { return lo <= v && v <= hi }) {
 			continue
 		}
 		vals, err := readStrings(rr, rgs[gi].ColumnChunks()[fi], &rg.Columns[fi].MetaData)
 		if err != nil {
 			return nil, fmt.Errorf("row group %d %s: %w", gi, filterCol, err)
 		}
-		if slices.Contains(vals, filterVal) {
+		if slices.ContainsFunc(vals, func(v string) bool { return slices.Contains(filterVals, v) }) {
 			out = append(out, gi)
 		}
 	}

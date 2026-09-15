@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -121,17 +122,56 @@ func TestComplete(t *testing.T) {
 	}
 }
 
+type bbox struct {
+	XMin float64 `parquet:"xmin"`
+	YMin float64 `parquet:"ymin"`
+	XMax float64 `parquet:"xmax"`
+	YMax float64 `parquet:"ymax"`
+}
+
+type names struct {
+	Primary string            `parquet:"primary"`
+	Common  map[string]string `parquet:"common"`
+}
+
+// serveBucket returns a client for a local bucket serving one object.
+func serveBucket(t *testing.T, key string, data []byte) *http.Client {
+	t.Helper()
+	prefix := key[:strings.LastIndex(key, "/")+1]
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("list-type") == "2" {
+			if r.URL.Query().Get("prefix") != prefix {
+				http.NotFound(w, r)
+				return
+			}
+			fmt.Fprintf(w, "<ListBucketResult><Contents><Key>%s</Key><Size>%d</Size></Contents></ListBucketResult>", key, len(data))
+			return
+		}
+		if r.URL.Path != "/"+key {
+			http.NotFound(w, r)
+			return
+		}
+		var start, end int64
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil || start < 0 || end < start || end >= int64(len(data)) {
+			http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[start : end+1])
+	}))
+	t.Cleanup(server.Close)
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		request := r.Clone(r.Context())
+		request.URL.Scheme, request.URL.Host = target.Scheme, target.Host
+		return http.DefaultTransport.RoundTrip(request)
+	})}
+}
+
 func TestAirportsWritesGlobalFilteredRows(t *testing.T) {
-	type bbox struct {
-		XMin float64 `parquet:"xmin"`
-		YMin float64 `parquet:"ymin"`
-		XMax float64 `parquet:"xmax"`
-		YMax float64 `parquet:"ymax"`
-	}
-	type names struct {
-		Primary string            `parquet:"primary"`
-		Common  map[string]string `parquet:"common"`
-	}
 	type row struct {
 		ID       string `parquet:"id"`
 		Geometry []byte `parquet:"geometry"`
@@ -157,40 +197,8 @@ func TestAirportsWritesGlobalFilteredRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const prefix = "release/test/theme=base/type=infrastructure/"
-	const key = prefix + "airports.parquet"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("list-type") == "2" {
-			if r.URL.Query().Get("prefix") != prefix {
-				http.NotFound(w, r)
-				return
-			}
-			fmt.Fprintf(w, "<ListBucketResult><Contents><Key>%s</Key><Size>%d</Size></Contents></ListBucketResult>", key, parquetData.Len())
-			return
-		}
-		if r.URL.Path != "/"+key {
-			http.NotFound(w, r)
-			return
-		}
-		var start, end int64
-		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil || start < 0 || end < start || end >= int64(parquetData.Len()) {
-			http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
-			return
-		}
-		w.WriteHeader(http.StatusPartialContent)
-		_, _ = w.Write(parquetData.Bytes()[start : end+1])
-	}))
-	defer server.Close()
-	target, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-		request := r.Clone(r.Context())
-		request.URL.Scheme, request.URL.Host = target.Scheme, target.Host
-		return http.DefaultTransport.RoundTrip(request)
-	})}
-	c := &Client{HTTP: client, Workers: 1, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	const key = "release/test/" + infraPrefix + "airports.parquet"
+	c := &Client{HTTP: serveBucket(t, key, parquetData.Bytes()), Workers: 1, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	dest := filepath.Join(t.TempDir(), "airports.geo")
 	count, err := c.Airports(context.Background(), "test", dest)
 	if err != nil {
@@ -229,6 +237,85 @@ func TestAirportsWritesGlobalFilteredRows(t *testing.T) {
 	want := cache.Row{ID: "regional", Name: "Regional", Primary: "Regional", Common: map[string]string{"en": "Regional"}, Subtype: "airport", Class: "regional_airport", AdminLevel: -1, Land: true, Bbox: geo.Bbox{XMax: 2, YMax: 2}}
 	if !reflect.DeepEqual(regional, want) {
 		t.Errorf("regional = %+v, want %+v", regional, want)
+	}
+}
+
+func TestWorldWritesCountriesAndDependencies(t *testing.T) {
+	type row struct {
+		ID            string `parquet:"id"`
+		Geometry      []byte `parquet:"geometry"`
+		Country       string `parquet:"country"`
+		Subtype       string `parquet:"subtype"`
+		Class         string `parquet:"class"`
+		AdminLevel    int32  `parquet:"admin_level"`
+		IsLand        bool   `parquet:"is_land"`
+		IsTerritorial bool   `parquet:"is_territorial"`
+		Bbox          bbox   `parquet:"bbox"`
+		Names         names  `parquet:"names"`
+	}
+	en := func(n string) names { return names{Primary: n, Common: map[string]string{"en": n}} }
+
+	var parquetData bytes.Buffer
+	w := parquet.NewWriter(&parquetData, parquet.SchemaOf(row{}))
+	// One row group per subtype, so admission alone decides what is read.
+	for _, r := range []row{
+		{ID: "china", Geometry: []byte{1}, Country: "CN", Subtype: "country", Class: "land", Bbox: bbox{XMax: 1, YMax: 1}, Names: en("China")},
+		{ID: "hong kong", Geometry: []byte{2}, Country: "HK", Subtype: "dependency", Class: "land", AdminLevel: 1, IsLand: true, IsTerritorial: true, Bbox: bbox{XMax: 2, YMax: 2}, Names: en("Hong Kong")},
+		{ID: "district", Geometry: []byte{3}, Country: "HK", Subtype: "region", Class: "land", Bbox: bbox{XMax: 3, YMax: 3}, Names: en("Central and Western District")},
+	} {
+		if err := w.Write(r); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	const key = "release/test/" + divisionsPrefix + "divisions.parquet"
+	c := &Client{HTTP: serveBucket(t, key, parquetData.Bytes()), Workers: 1, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx := context.Background()
+	refs, err := c.plan(ctx, "test", divisionsPrefix, "subtype", worldSubtypes, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 2 || refs[0].index != 0 || refs[1].index != 1 {
+		t.Fatalf("admitted %d row groups %v, want the country and dependency groups", len(refs), refs)
+	}
+	dest := filepath.Join(t.TempDir(), "world.geo")
+	count, err := c.World(ctx, "test", dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("wrote %d rows, want 2", count)
+	}
+	f, err := cache.Open(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if f.Header.Kind != "world" || f.Header.Release != "test" || !f.Header.Dependencies {
+		t.Fatalf("header = %+v, want a world header carrying dependencies", f.Header)
+	}
+	got := map[string]cache.Row{}
+	for _, r := range f.Rows {
+		got[r.ID] = r
+	}
+	if _, ok := got["china"]; !ok {
+		t.Error("missing country row")
+	}
+	if _, ok := got["district"]; ok {
+		t.Error("wrote a region row")
+	}
+	hk := got["hong kong"]
+	hk.Off, hk.Len = 0, 0
+	want := cache.Row{ID: "hong kong", Country: "HK", Name: "Hong Kong", Primary: "Hong Kong", Common: map[string]string{"en": "Hong Kong"},
+		Subtype: "dependency", Class: "land", AdminLevel: 1, Territorial: true, Land: true, Bbox: geo.Bbox{XMax: 2, YMax: 2}}
+	if !reflect.DeepEqual(hk, want) {
+		t.Errorf("hong kong = %+v, want %+v", hk, want)
 	}
 }
 

@@ -31,7 +31,8 @@ var airportRank = map[string]int{
 
 // Fetcher builds a missing cache file on demand. Nil disables fetching.
 type Fetcher interface {
-	World(ctx context.Context, dest string) error
+	// World uses the fetcher's default release when release is empty.
+	World(ctx context.Context, release, dest string) error
 	Divisions(ctx context.Context, code string, box geo.Bbox, dest string) error
 	Airports(ctx context.Context, dest string) error
 }
@@ -80,7 +81,7 @@ func (p *Provider) open(path string) (*cache.File, error) {
 	return f, err
 }
 
-// World opens the country polygons, fetching them when absent.
+// World opens the world cache, fetching it if missing or lacking dependencies.
 func (p *Provider) World(ctx context.Context) (*cache.File, error) {
 	if p.world != nil {
 		return p.world, nil
@@ -92,9 +93,12 @@ func (p *Provider) World(ctx context.Context) (*cache.File, error) {
 	f, err := p.open(path)
 	if errors.Is(err, fs.ErrNotExist) && p.Fetch != nil {
 		p.Log.Info("fetching country polygons", "path", path)
-		if err = p.Fetch.World(ctx, path); err == nil {
+		if err = p.Fetch.World(ctx, "", path); err == nil {
 			f, err = p.open(path)
 		}
+	}
+	if err == nil && !f.Header.Dependencies {
+		f, err = p.withDependencies(ctx, f)
 	}
 	if err != nil {
 		p.worldErr = fmt.Errorf("world cache: %w", err)
@@ -102,6 +106,22 @@ func (p *Provider) World(ctx context.Context) (*cache.File, error) {
 	}
 	p.world = f
 	return f, nil
+}
+
+// withDependencies preserves the release and keeps the old cache on fetch failure.
+func (p *Provider) withDependencies(ctx context.Context, old *cache.File) (*cache.File, error) {
+	if p.Fetch == nil {
+		p.Log.Warn("cache has no dependency territories, Hong Kong and the like go unnamed; refetch it", "path", old.Path)
+		return old, nil
+	}
+	p.Log.Info("refetching country polygons for the dependency territories", "path", old.Path, "release", old.Header.Release)
+	if err := p.Fetch.World(ctx, old.Header.Release, old.Path); err != nil {
+		p.Log.Warn("refetch failed, keeping the country polygons without dependency territories", "path", old.Path, "err", err)
+		return old, nil
+	}
+	f, err := p.open(old.Path)
+	old.Close()
+	return f, err
 }
 
 // Divisions opens a country's divisions, fetching them when absent. A failure

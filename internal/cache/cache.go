@@ -24,12 +24,18 @@ const magic = "RGEO0001"
 // ErrInvalid marks a file that failed validation; callers treat it as absent.
 var ErrInvalid = errors.New("invalid cache file")
 
+// ErrNoRows means the writer had no rows and left the destination untouched.
+var ErrNoRows = errors.New("no rows to cache")
+
 // Header describes what a file holds.
 type Header struct {
 	Kind    string // world, divisions, airports
 	Code    string // alpha-2, empty for world
 	Release string
 	Fetched time.Time
+	// Dependencies marks world caches built with dependency territories.
+	// Older files decode it as false.
+	Dependencies bool
 }
 
 // Row is one geometry's index entry.
@@ -102,10 +108,15 @@ func (w *Writer) Add(r Row, wkb []byte) error {
 // Count is the number of rows added.
 func (w *Writer) Count() int { return len(w.rows) }
 
-// Close writes the index and trailer, syncs and renames over dest.
+// Close writes the index and trailer, syncs and renames over dest. A writer
+// that added no rows publishes nothing and returns ErrNoRows.
 func (w *Writer) Close() error {
 	if w.done {
 		return errors.New("cache writer already closed")
+	}
+	if len(w.rows) == 0 {
+		w.Abort()
+		return ErrNoRows
 	}
 	err := func() error {
 		if err := gob.NewEncoder(w.w).Encode(tail{w.hdr, w.rows}); err != nil {

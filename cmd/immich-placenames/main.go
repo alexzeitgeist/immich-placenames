@@ -275,12 +275,14 @@ func (f *fetcher) worldRelease() string {
 	return w.Header.Release
 }
 
-func (f *fetcher) World(ctx context.Context, dest string) error {
-	r, err := f.Release(ctx)
-	if err != nil {
-		return err
+func (f *fetcher) World(ctx context.Context, release, dest string) error {
+	if release == "" {
+		var err error
+		if release, err = f.Release(ctx); err != nil {
+			return err
+		}
 	}
-	_, err = f.c.World(ctx, r, dest)
+	_, err := f.c.World(ctx, release, dest)
 	return err
 }
 
@@ -319,7 +321,7 @@ func (a *app) fetch(ctx context.Context, fs *flag.FlagSet, args []string) error 
 	p := overture.New(a.data, nil, f, a.log)
 	defer p.Close()
 	if world {
-		if err := f.World(ctx, overture.WorldPath(a.data)); err != nil {
+		if err := f.World(ctx, "", overture.WorldPath(a.data)); err != nil {
 			return err
 		}
 	}
@@ -686,7 +688,11 @@ func printCaches(out io.Writer, dir string) {
 			if f.HasCommon {
 				names += fmt.Sprintf("+common(%d languages)", len(f.Languages()))
 			}
-			fmt.Fprintf(out, "%-18s release %s rows %d size %d MB fetched %s names %s\n", rel, f.Header.Release, len(f.Rows), f.Size()/1e6, f.Header.Fetched.Format(time.RFC3339), names)
+			note := ""
+			if f.Header.Kind == "world" && !f.Header.Dependencies {
+				note = " without dependency territories"
+			}
+			fmt.Fprintf(out, "%-18s release %s rows %d size %d MB fetched %s names %s%s\n", rel, f.Header.Release, len(f.Rows), f.Size()/1e6, f.Header.Fetched.Format(time.RFC3339), names, note)
 			f.Close()
 		}
 	}

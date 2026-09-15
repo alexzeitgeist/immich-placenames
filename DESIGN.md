@@ -4,6 +4,8 @@ immich-placenames is a CLI built as one static Go binary. The `run` command make
 
 ## Boundary selection
 
+`world.geo` includes countries and dependency territories. They can overlap: Gibraltar wins over Spain's territorial polygon on bounding-box size; both are territorial.
+
 The resolver finds a country in `world.geo`, then reads that country's divisions. It checks bounding boxes before testing geometry, using even-odd containment with an edge tolerance of 0.00015 degrees.
 
 Candidates rank in this order:
@@ -38,7 +40,7 @@ A dry run keeps all proposed names in memory to sort its CSV. Smaller pages won'
 
 The fetcher reads raw Parquet values by leaf column and resets name fields between rows to prevent names leaking from one record to the next.
 
-Each `.geo` file contains WKB geometry followed by a gob header and index. Writers sync a separate temporary file before renaming it into place. Readers validate caches on open; invalid geometry fails the lookup.
+Each `.geo` file contains WKB geometry followed by a gob header and index. The header marks dependency support. Empty fetches fail and preserve existing files. Writers sync a temporary file before renaming it. Readers validate caches on open; invalid geometry fails the lookup.
 
 HTTP requests time out after two minutes, including body reads. Fetch workers read row groups in parallel; assets are resolved sequentially. See [DATA.md](DATA.md) for transfer and memory measurements.
 
