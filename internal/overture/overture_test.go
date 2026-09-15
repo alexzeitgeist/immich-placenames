@@ -204,8 +204,10 @@ func TestProfileMerge(t *testing.T) {
 		}
 	}
 	bundled, _ := LoadProfiles("")
+	germanPrefixes := []string{"Landkreis ", "Kreis ", "GVV ", "VVG ", "Samtgemeinde ", "Verwaltungsgemeinschaft "}
 	if got := bundled.Profile("de"); got.TieBreakMode != TieBreakLargest || *got.FallbackDistance != DefaultFallbackDistance || !*got.Airports ||
-		!reflect.DeepEqual(got.Language, Languages{"en", "primary"}) || got.RejectNamePrefixes != nil {
+		!reflect.DeepEqual(got.Language, Languages{"en", "primary"}) ||
+		got.RejectNamePrefixes == nil || !reflect.DeepEqual(*got.RejectNamePrefixes, germanPrefixes) {
 		t.Errorf("bundled DE: %v", got)
 	}
 	for name, body := range map[string]string{

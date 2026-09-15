@@ -230,30 +230,40 @@ Overrides apply only to resolved city names. They leave state and country fields
 
 ### Skipping names
 
-The German profile prefers counties to name photos in Stuttgart or Munich after the city. This can give rural photos a district name such as `Landkreis Waldshut` instead of `Jestetten`. To skip these names and leave the choice to the next candidate:
+The German profile prefers counties to keep city names such as Stuttgart or Munich. To avoid district and administrative association names for rural photos, it rejects six prefixes:
+
+```json
+"rejectNamePrefixes": ["Landkreis ", "Kreis ", "GVV ", "VVG ", "Samtgemeinde ", "Verwaltungsgemeinschaft "]
+```
+
+The first two prefixes exclude districts; the other four exclude administrative associations. Overture classifies `GVV Jestetten`, `VVG der Stadt Konstanz` and `Samtgemeinde Bersenbrück` as `locality`, just like their member municipalities. The German profile prefers the largest bounding box when other rankings tie. Rejecting only district names therefore gives `GVV Jestetten` instead of `Jestetten`.
+
+Cities that are counties of their own, such as Stuttgart, have none of these prefixes and keep their names.
+
+These prefixes were checked against Overture release `2026-08-19.0`; they may not cover every association name. The list excludes `Amt ` because municipalities such as Amt Neuhaus use it.
+
+To name German photos after their district again, clear the list:
 
 ```json
 {
   "countryOverrides": {
     "DE": {
-      "rejectNamePrefixes": ["Landkreis ", "Kreis ", "GVV ", "VVG "]
+      "rejectNamePrefixes": []
     }
   }
 }
 ```
 
-Overture classifies `GVV Jestetten` and `VVG der Stadt Titisee-Neustadt` as `locality`, just like their member municipalities. The German profile prefers the largest bounding box when other rankings tie. Rejecting only district names therefore gives `GVV Jestetten` instead of `Jestetten`. These four prefixes were checked in Baden-Württemberg; they may not cover every association name.
-
 With `smallest-area`, the resolver can select a village within the municipality:
 
 | Setting | At Jestetten | At Litzelstetten near Konstanz |
 |---|---|---|
-| Reject `GVV ` and `VVG ` too | Jestetten | Constance |
-| Reject the district prefixes with `"tieBreakMode": "smallest-area"` | Jestetten | Litzelstetten |
+| Bundled | Jestetten | Constance |
+| `"tieBreakMode": "smallest-area"` | Jestetten | Litzelstetten |
 
-Choose municipality or village names to suit your library. Both rows use English names.
+Choose municipality or village names to suit your library. Both rows use English names. With `"language": "de"`, `Constance` becomes `Konstanz`; `Litzelstetten` stays the same.
 
-No prefixes are rejected by default. If you set prefixes in `defaultProfile`, use `"rejectNamePrefixes": []` in a country override to clear the inherited list.
+No other country rejects prefixes by default. If you set prefixes in `defaultProfile`, use `"rejectNamePrefixes": []` in a country override to clear the inherited list.
 
 Matching ignores case. `ß` matches `ẞ`, but not `SS`. Write prefixes in your chosen name language. The trailing space in `Kreis ` rejects `Kreis Steinfurt` but keeps the municipality `Kreischa`.
 

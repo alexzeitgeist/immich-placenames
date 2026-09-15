@@ -6,7 +6,8 @@
   "countryOverrides": {
     "DE": {
       "preferredSubtypes": ["county", "locality", "localadmin", "borough", "macrohood", "neighborhood", "microhood"],
-      "tieBreakMode": "largest-area"
+      "tieBreakMode": "largest-area",
+      "rejectNamePrefixes": ["Landkreis ", "Kreis ", "GVV ", "VVG ", "Samtgemeinde ", "Verwaltungsgemeinschaft "]
     },
     "FI": {
       "preferredSubtypes": ["locality", "localadmin", "borough", "macrohood", "neighborhood", "microhood"],

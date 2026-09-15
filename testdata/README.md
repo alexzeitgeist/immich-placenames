@@ -14,9 +14,9 @@ We checked the expected names against that release's boundaries and resolver res
 | Delhi and Faridabad | Local subtype first, county when no preferred local subtype contains |
 | Vienna, Ubud, Miami Beach, Fort Lauderdale, Westwood | District and locality selection |
 | Lapad and Cavtat water | Country/state at sea, nearest-city distance limit, state fallback with distance zero |
-| Everglades and Death Valley | The bundled US county fallback where no locality reaches the point |
-| Key West water | A nearby locality still outranks a containing county |
-| Jestetten district names | Bundled German ranking, its association names and the two ways past them |
+| Everglades and Death Valley | Bundled US county fallback when no locality matches |
+| Key West water | Nearest-locality matching before county fallback |
+| Jestetten, Litzelstetten, Bersenbrück, Stuttgart | German district and association rejection, with Stuttgart retained |
 | Lapad language test | Croatian primary names and German translations |
 | Dependency territories | Country selection across 105 polygons and 53 codes |
 

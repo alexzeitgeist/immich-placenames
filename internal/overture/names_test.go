@@ -82,7 +82,7 @@ func TestRejectedNamesLeaveTheChoiceToTheNext(t *testing.T) {
 	}
 }
 
-func TestGermanProfileNameRejectionIsOptIn(t *testing.T) {
+func TestGermanProfileRejectsDistrictNames(t *testing.T) {
 	dir := t.TempDir()
 	writeCache(t, WorldPath(dir), cache.Row{ID: "de", Country: "DE", Name: "Germany", Subtype: "country", Bbox: unitBox})
 	writeCache(t, DivisionsPath(dir, "DE"),
@@ -93,10 +93,11 @@ func TestGermanProfileNameRejectionIsOptIn(t *testing.T) {
 	for _, tc := range []struct {
 		name, catalog, city string
 	}{
-		{"bundled", `{"defaultProfile": {"airports": false}}`, "Landkreis Oberallgäu"},
-		{"opt-in", `{"defaultProfile": {"airports": false}, "countryOverrides": {"DE": {"rejectNamePrefixes": ["Landkreis ", "Kreis "]}}}`, "Oberstdorf"},
-		{"inherited", `{"defaultProfile": {"airports": false, "rejectNamePrefixes": ["Landkreis ", "Kreis "]}}`, "Oberstdorf"},
-		{"cleared", `{"defaultProfile": {"airports": false, "rejectNamePrefixes": ["Landkreis ", "Kreis "]}, "countryOverrides": {"DE": {"rejectNamePrefixes": []}}}`, "Landkreis Oberallgäu"},
+		{"bundled", `{"defaultProfile": {"airports": false}}`, "Oberstdorf"},
+		{"cleared by the country", `{"defaultProfile": {"airports": false}, "countryOverrides": {"DE": {"rejectNamePrefixes": []}}}`, "Landkreis Oberallgäu"},
+		{"cleared by the user default", `{"defaultProfile": {"airports": false, "rejectNamePrefixes": []}}`, "Landkreis Oberallgäu"},
+		{"replaced, not merged", `{"defaultProfile": {"airports": false}, "countryOverrides": {"DE": {"rejectNamePrefixes": ["Kreis "]}}}`, "Landkreis Oberallgäu"},
+		{"inherited from the user default", `{"defaultProfile": {"airports": false, "rejectNamePrefixes": ["Landkreis ", "Kreis "]}}`, "Oberstdorf"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			profiles, _ := writeProfileCatalog(t, t.TempDir(), tc.catalog)
