@@ -241,6 +241,21 @@ func TestPointExplanationDistanceUnits(t *testing.T) {
 	}
 }
 
+func TestExplanationReportsTheReplacedCountry(t *testing.T) {
+	e := &overture.Explanation{
+		Code: "GB", Releases: map[string]string{"divisions/GB": "fixture"},
+		Divisions:       []overture.Candidate{{Name: "Scotland", Subtype: "region", Contains: true, Decision: "country"}},
+		CountryReplaced: "United Kingdom",
+		Result:          geocode.Result{City: "Old Town", State: "City of Edinburgh", Country: "Scotland", Found: true},
+	}
+	var out strings.Builder
+	printExplanation(&out, e, e.Result)
+	got := out.String()
+	if !strings.Contains(got, "country: United Kingdom to Scotland\n") || !strings.Contains(got, "region") {
+		t.Errorf("replaced country missing from %q", got)
+	}
+}
+
 func TestDefaultRunSuppressesResolvedLogs(t *testing.T) {
 	a := quiet(t.TempDir())
 	var logs strings.Builder

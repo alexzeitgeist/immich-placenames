@@ -165,6 +165,12 @@ func TestAirportRanking(t *testing.T) {
 func f64(v float64) *float64 { return &v }
 func boolp(v bool) *bool     { return &v }
 
+// strs is a reject-prefix list; strs() is the empty list that clears one.
+func strs(v ...string) *[]string {
+	list := append([]string{}, v...)
+	return &list
+}
+
 func TestProfileMerge(t *testing.T) {
 	dir := t.TempDir()
 	user := filepath.Join(dir, "profiles.json")
@@ -173,8 +179,9 @@ func TestProfileMerge(t *testing.T) {
 	  "countryOverrides": {
 	    "hr": {"preferredSubtypes": ["County", "locality", " county "], "tieBreakMode": "largest-area", "airports": false, "stateSubtypes": ["County", " region "]},
 	    "IN": {"preferredSubtypes": ["locality", "county"], "tieBreakMode": "", "fallbackDistance": 0, "language": " EN "},
-	    "DE": {"preferredSubtypes": [], "tieBreakMode": "smallest-area"},
+	    "DE": {"preferredSubtypes": [], "tieBreakMode": "smallest-area", "rejectNamePrefixes": []},
 	    "FR": {"language": ["DE", "en", " "]},
+	    "GB": {"countryFrom": " Region "},
 	    "XX": {"preferredSubtypes": ["  "], "tieBreakMode": " Largest-Area ", "stateSubtypes": ["  "]}
 	  }}`), 0o644)
 	p, err := LoadProfiles(user)
@@ -182,12 +189,13 @@ func TestProfileMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]Profile{
-		"CH": {defaultSubtypes, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil},
-		"HR": {[]string{"county", "locality"}, TieBreakLargest, f64(0.005), boolp(false), Languages{"primary", "en"}, []string{"county", "region"}, boolp(false), f64(500), nil},
-		"IN": {[]string{"locality", "county"}, TieBreakSmallest, f64(0), boolp(true), Languages{"en", "primary"}, defaultStateSubtypes, boolp(false), f64(500), nil},
-		"DE": {[]string{"county", "locality", "localadmin", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil},
-		"FR": {[]string{"localadmin", "locality", "county", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakLargest, f64(0.005), boolp(true), Languages{"de", "en", "primary"}, defaultStateSubtypes, boolp(false), f64(500), nil},
-		"XX": {defaultSubtypes, TieBreakLargest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil},
+		"CH": {defaultSubtypes, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, ""},
+		"HR": {[]string{"county", "locality"}, TieBreakLargest, f64(0.005), boolp(false), Languages{"primary", "en"}, []string{"county", "region"}, boolp(false), f64(500), nil, nil, ""},
+		"IN": {[]string{"locality", "county"}, TieBreakSmallest, f64(0), boolp(true), Languages{"en", "primary"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, ""},
+		"DE": {[]string{"county", "locality", "localadmin", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, strs(), ""},
+		"FR": {[]string{"localadmin", "locality", "county", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakLargest, f64(0.005), boolp(true), Languages{"de", "en", "primary"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, ""},
+		"GB": {defaultSubtypes, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, "region"},
+		"XX": {defaultSubtypes, TieBreakLargest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, ""},
 	}
 	for code, want := range cases {
 		if got := p.Profile(code); !reflect.DeepEqual(got, want) {
@@ -195,7 +203,8 @@ func TestProfileMerge(t *testing.T) {
 		}
 	}
 	bundled, _ := LoadProfiles("")
-	if got := bundled.Profile("de"); got.TieBreakMode != TieBreakLargest || *got.FallbackDistance != DefaultFallbackDistance || !*got.Airports || !reflect.DeepEqual(got.Language, Languages{"en", "primary"}) {
+	if got := bundled.Profile("de"); got.TieBreakMode != TieBreakLargest || *got.FallbackDistance != DefaultFallbackDistance || !*got.Airports ||
+		!reflect.DeepEqual(got.Language, Languages{"en", "primary"}) || got.RejectNamePrefixes != nil {
 		t.Errorf("bundled DE: %v", got)
 	}
 	for name, body := range map[string]string{
@@ -204,6 +213,8 @@ func TestProfileMerge(t *testing.T) {
 		"negative":     `{"countryOverrides": {"HR": {"fallbackDistance": -1}}}`,
 		"subtype":      `{"defaultProfile": {"preferredSubtypes": ["localiity"]}}`,
 		"state":        `{"countryOverrides": {"HR": {"stateSubtypes": ["regoin"]}}}`,
+		"country from": `{"countryOverrides": {"HR": {"countryFrom": "regoin"}}}`,
+		"blank prefix": `{"defaultProfile": {"rejectNamePrefixes": ["Landkreis ", " "]}}`,
 		"key":          `{"countryOverrides": {"HRV": {"airports": false}}}`,
 		"language":     `{"defaultProfile": {"language": "d e"}}`,
 		"languages":    `{"defaultProfile": {"language": ["de", 1]}}`,

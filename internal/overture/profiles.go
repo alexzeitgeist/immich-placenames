@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 //go:embed profiles.json
@@ -131,6 +132,12 @@ type Profile struct {
 	PointFallback     *bool          `json:"pointFallback,omitempty"`
 	PointDistance     *float64       `json:"pointDistance,omitempty"` // metres; 0 disables
 	CityOverrides     []CityOverride `json:"cityOverrides,omitempty"`
+	// RejectNamePrefixes matches case-insensitively and preserves spaces.
+	// Nil inherits; an empty list clears inherited prefixes.
+	RejectNamePrefixes *[]string `json:"rejectNamePrefixes,omitempty"`
+	// CountryFrom is the division subtype whose name replaces the country.
+	// The code from world.geo still selects the cache and profile.
+	CountryFrom string `json:"countryFrom,omitempty"`
 }
 
 // CityOverride replaces a resolved city name, optionally restricted by State.
@@ -157,7 +164,8 @@ type Profiles struct {
 // LoadProfiles reads the user catalog at path; an empty path means bundled
 // only. Unknown keys, content after the catalog, override keys that are not
 // alpha-2, unknown subtypes, unknown tie-break modes, negative distances,
-// city overrides without a name to match and malformed languages are errors.
+// city overrides without a name to match, empty reject prefixes and
+// malformed languages are errors.
 func LoadProfiles(path string) (*Profiles, error) {
 	p := &Profiles{path: path}
 	if err := decode(bundledJSON, &p.bundled); err != nil {
@@ -212,6 +220,16 @@ func decode(b []byte, c *Catalog) error {
 			if strings.TrimSpace(o.From) == "" {
 				return fmt.Errorf("%s: cityOverrides[%d] has no from", name, i)
 			}
+		}
+		if p.RejectNamePrefixes != nil {
+			for i, prefix := range *p.RejectNamePrefixes {
+				if strings.TrimSpace(prefix) == "" {
+					return fmt.Errorf("%s: rejectNamePrefixes[%d] is empty", name, i)
+				}
+			}
+		}
+		if err := subtypes(name, "countryFrom", []string{p.CountryFrom}); err != nil {
+			return err
 		}
 		return checkLanguages(name, p.Language)
 	}
@@ -282,6 +300,13 @@ func (p Profile) apply(o Profile) Profile {
 	if len(o.CityOverrides) > 0 {
 		p.CityOverrides = slices.Clone(o.CityOverrides)
 	}
+	if o.RejectNamePrefixes != nil {
+		list := slices.Clone(*o.RejectNamePrefixes)
+		p.RejectNamePrefixes = &list
+	}
+	if strings.TrimSpace(o.CountryFrom) != "" {
+		p.CountryFrom = o.CountryFrom
+	}
 	return p
 }
 
@@ -313,7 +338,23 @@ func (p Profile) normalize() Profile {
 	}
 	p.Language = normalizeLanguages(p.Language)
 	p.CityOverrides = normalizeOverrides(p.CityOverrides)
+	if p.RejectNamePrefixes != nil {
+		list := normalizePrefixes(*p.RejectNamePrefixes)
+		p.RejectNamePrefixes = &list
+	}
+	p.CountryFrom = strings.ToLower(strings.TrimSpace(p.CountryFrom))
 	return p
+}
+
+// normalizePrefixes removes blanks and duplicates, preserving case and spaces.
+func normalizePrefixes(list []string) []string {
+	out := []string{}
+	for _, prefix := range list {
+		if strings.TrimSpace(prefix) != "" && !slices.Contains(out, prefix) {
+			out = append(out, prefix)
+		}
+	}
+	return out
 }
 
 func normalizeOverrides(list []CityOverride) []CityOverride {
@@ -339,6 +380,34 @@ func (p Profile) Override(city, state string) int {
 		}
 	}
 	return -1
+}
+
+// RejectedBy returns the first configured prefix the name starts with, or "".
+// Matching ignores case.
+func (p Profile) RejectedBy(name string) string {
+	if p.RejectNamePrefixes == nil {
+		return ""
+	}
+	for _, prefix := range *p.RejectNamePrefixes {
+		if hasPrefixFold(name, prefix) {
+			return prefix
+		}
+	}
+	return ""
+}
+
+// hasPrefixFold compares whole runes because case equivalents such as ß and ẞ
+// have different UTF-8 lengths.
+func hasPrefixFold(name, prefix string) bool {
+	end := 0
+	for range prefix {
+		if end == len(name) {
+			return false
+		}
+		_, size := utf8.DecodeRuneInString(name[end:])
+		end += size
+	}
+	return strings.EqualFold(name[:end], prefix)
 }
 
 func normalizeSubtypes(list, def []string) []string {
@@ -400,6 +469,9 @@ func (p Profile) String() string {
 	if len(p.StateSubtypes) > 0 {
 		s += " state=[" + strings.Join(p.StateSubtypes, " ") + "]"
 	}
+	if p.CountryFrom != "" {
+		s += " country=" + p.CountryFrom
+	}
 	if p.FallbackDistance != nil {
 		s += fmt.Sprintf(" fallback=%g", *p.FallbackDistance)
 	}
@@ -417,6 +489,9 @@ func (p Profile) String() string {
 	}
 	if len(p.CityOverrides) > 0 {
 		s += fmt.Sprintf(" cityOverrides=%d", len(p.CityOverrides))
+	}
+	if p.RejectNamePrefixes != nil && len(*p.RejectNamePrefixes) > 0 {
+		s += fmt.Sprintf(" reject=%q", *p.RejectNamePrefixes)
 	}
 	return s
 }

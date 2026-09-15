@@ -25,6 +25,10 @@ Matches within the edge tolerance rank the same as exact containment. Candidates
 
 The profile sets the city's area tie-break; states always prefer the smaller area. See [Profiles](HOWTO.md#profiles) for settings and examples.
 
+The resolver skips candidates whose names match `rejectNamePrefixes`. This applies to divisions, division points and airports, but not to the country name from `world.geo`.
+
+With `countryFrom`, the resolver uses a containing division for the country name and excludes it from state and city selection. The country code from `world.geo` still selects the divisions cache and profile.
+
 If no preferred subtype contains the point, the resolver tries nearby boundaries within `fallbackDistance` (default 0.01 degrees). Their bounding boxes must still contain the point. They rank by subtype preference, edge distance, then ID.
 
 If neither step finds a city and `pointFallback` is enabled, the resolver searches the country's division points within `pointDistance` (default 500 metres). Labels rank by subtype preference, distance, then ID. The resolver selects the containing division of a state subtype with the smallest bounding box and rejects labels outside its geometry. If no such division contains the query point, the resolver skips this check.

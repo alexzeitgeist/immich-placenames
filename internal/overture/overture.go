@@ -402,6 +402,16 @@ func (p *Provider) gatherPoints(f *cache.File, pt geocode.Point, chain Languages
 	return out, nil
 }
 
+// rejectNames marks rejected candidates before selection, which skips candidates
+// with a decision. lookup prints the rejection reason.
+func rejectNames(cands []Candidate, p Profile) {
+	for i := range cands {
+		if prefix := p.RejectedBy(cands[i].Name); prefix != "" {
+			cands[i].Decision = fmt.Sprintf("name rejected, prefix %q", prefix)
+		}
+	}
+}
+
 func adminOrder(l int32) int64 {
 	if l < 0 {
 		return math.MaxInt32
@@ -428,6 +438,19 @@ func rankCountry(cands []Candidate) int {
 		}
 	}
 	return best
+}
+
+// selectCountryDivision returns the country division index, or -1 if disabled,
+// unmatched or unnamed.
+func selectCountryDivision(cands []Candidate, subtype string) int {
+	if subtype == "" {
+		return -1
+	}
+	i := selectName(cands, []string{subtype}, false)
+	if i < 0 || cands[i].Name == "" {
+		return -1
+	}
+	return i
 }
 
 func subtypeIndex(list []string, s string) int {
@@ -464,7 +487,7 @@ func nameBefore(a, b Candidate, list []string, largest bool) bool {
 func selectName(cands []Candidate, list []string, largest bool) int {
 	best := -1
 	for i, c := range cands {
-		if !c.Contains || subtypeIndex(list, c.Subtype) < 0 {
+		if c.Decision != "" || !c.Contains || subtypeIndex(list, c.Subtype) < 0 {
 			continue
 		}
 		if best < 0 || nameBefore(c, cands[best], list, largest) {
@@ -490,7 +513,7 @@ func nearestBefore(a, b Candidate, list []string) bool {
 func selectNearest(cands []Candidate, list []string, bound float64) int {
 	best := -1
 	for i, c := range cands {
-		if c.Contains || c.Distance > bound || subtypeIndex(list, c.Subtype) < 0 {
+		if c.Decision != "" || c.Contains || c.Distance > bound || subtypeIndex(list, c.Subtype) < 0 {
 			continue
 		}
 		if best < 0 || nearestBefore(c, cands[best], list) {
@@ -534,7 +557,7 @@ func guardBefore(a, b Candidate) bool {
 }
 
 // guardArea returns the containing state division with the smallest bbox,
-// or -1 if none contains the query point.
+// or -1 if none contains the query point. Name decisions do not affect the guard.
 func guardArea(cands []Candidate, list []string) int {
 	best := -1
 	for i, c := range cands {
@@ -577,7 +600,10 @@ func airportBefore(a, b Candidate, pt geocode.Point) bool {
 func selectAirport(cands []Candidate, pt geocode.Point) int {
 	best := -1
 	for i, c := range cands {
-		if c.Contains && (best < 0 || airportBefore(c, cands[best], pt)) {
+		if c.Decision != "" || !c.Contains {
+			continue
+		}
+		if best < 0 || airportBefore(c, cands[best], pt) {
 			best = i
 		}
 	}
@@ -586,19 +612,20 @@ func selectAirport(cands []Candidate, pt geocode.Point) int {
 
 // Explanation is the full calculation behind one result.
 type Explanation struct {
-	Point      geocode.Point     `json:"point"`
-	Countries  []Candidate       `json:"countries"`
-	Code       string            `json:"code"`
-	Profile    Profile           `json:"profile"`
-	Divisions  []Candidate       `json:"divisions"`
-	Points     []Candidate       `json:"points"`
-	Airports   []Candidate       `json:"airports"`
-	State      string            `json:"state"`
-	City       string            `json:"city"`
-	Airport    string            `json:"airport"`
-	Overridden string            `json:"overridden,omitempty"` // the city name a profile rewrote
-	Result     geocode.Result    `json:"result"`
-	Releases   map[string]string `json:"releases"`
+	Point           geocode.Point     `json:"point"`
+	Countries       []Candidate       `json:"countries"`
+	Code            string            `json:"code"`
+	Profile         Profile           `json:"profile"`
+	Divisions       []Candidate       `json:"divisions"`
+	Points          []Candidate       `json:"points"`
+	Airports        []Candidate       `json:"airports"`
+	State           string            `json:"state"`
+	City            string            `json:"city"`
+	Airport         string            `json:"airport"`
+	Overridden      string            `json:"overridden,omitempty"`      // the city name a profile rewrote
+	CountryReplaced string            `json:"countryReplaced,omitempty"` // the country name a profile replaced
+	Result          geocode.Result    `json:"result"`
+	Releases        map[string]string `json:"releases"`
 }
 
 // Resolve implements geocode.Resolver. The city fallback is geocode's job.
@@ -708,13 +735,14 @@ func (p *Provider) points(ctx context.Context, e *Explanation, pt geocode.Point,
 	if e.Points, err = p.gatherPoints(f, pt, p.chain(f, e.Profile.Language), window); err != nil {
 		return -1, err
 	}
+	rejectNames(e.Points, e.Profile)
 	if gi := guardArea(e.Divisions, e.Profile.StateSubtypes); gi >= 0 {
 		g, err := d.Geometry(e.Divisions[gi].row)
 		if err != nil {
 			return -1, err
 		}
 		for i := range e.Points {
-			if e.Points[i].Metres <= metres && !g.Contains(e.Points[i].lon, e.Points[i].lat) {
+			if e.Points[i].Decision == "" && e.Points[i].Metres <= metres && !g.Contains(e.Points[i].lon, e.Points[i].lat) {
 				e.Points[i].Decision = "outside " + e.Divisions[gi].Name
 			}
 		}
@@ -751,7 +779,7 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 	e.Code = e.Countries[ci].Country
 	e.Profile = p.profile(e.Code)
 	e.Countries[ci].Name, e.Countries[ci].Language = nameOf(w, e.Countries[ci].row, p.chain(w, e.Profile.Language))
-	country := e.Countries[ci]
+	countryName, countryLang := e.Countries[ci].Name, e.Countries[ci].Language
 	d, err := p.Divisions(ctx, e.Code)
 	if err != nil {
 		return nil, err
@@ -761,6 +789,11 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 	e.Divisions, err = p.gather(d, pt, p.chain(d, e.Profile.Language), measure(bound))
 	if err != nil {
 		return nil, err
+	}
+	rejectNames(e.Divisions, e.Profile)
+	if i := selectCountryDivision(e.Divisions, e.Profile.CountryFrom); i >= 0 {
+		e.CountryReplaced, countryName, countryLang = countryName, e.Divisions[i].Name, e.Divisions[i].Language
+		e.Divisions[i].Decision = "country"
 	}
 	si := selectName(e.Divisions, e.Profile.StateSubtypes, false)
 	if si < 0 {
@@ -802,6 +835,7 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 		if err != nil {
 			return nil, err
 		}
+		rejectNames(e.Airports, e.Profile)
 		ai := selectAirport(e.Airports, pt)
 		if ai >= 0 {
 			e.Airport = e.Airports[ai].Name
@@ -834,14 +868,14 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 		e.Overridden, city = city, e.Profile.CityOverrides[i].To
 		p.overridden++
 	}
-	p.served[country.Language]++
+	p.served[countryLang]++
 	if si >= 0 {
 		p.served[e.Divisions[si].Language]++
 	}
 	if city != "" {
 		p.served[cityLang]++
 	}
-	e.Result = geocode.Result{City: city, State: e.State, Country: country.Name, Found: true}
+	e.Result = geocode.Result{City: city, State: e.State, Country: countryName, Found: true}
 	return e, nil
 }
 

@@ -496,6 +496,9 @@ func printExplanation(out io.Writer, e *overture.Explanation, final geocode.Resu
 		fmt.Fprintln(w, "airports off")
 	}
 	fmt.Fprintf(w, "state: %s\ncity: %s\nairport: %s\n", or(e.State, "-"), or(e.City, "-"), or(e.Airport, "-"))
+	if e.CountryReplaced != "" {
+		fmt.Fprintf(w, "country: %s to %s\n", e.CountryReplaced, or(e.Result.Country, "-"))
+	}
 	if e.Overridden != "" {
 		fmt.Fprintf(w, "override: %s to %s\n", e.Overridden, or(e.Result.City, "-"))
 	}

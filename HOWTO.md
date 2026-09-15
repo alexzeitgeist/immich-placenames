@@ -111,7 +111,7 @@ Start with `lookup`. Check whether the boundary you want appears and contains th
 
 The tool loads `profiles.json` from the data directory, using bundled settings if the file is absent. An explicit `-profiles FILE` must exist.
 
-Fields merge in this order: bundled default → bundled country → user default → user country. Your global defaults can override the bundled DE/FI/FR rules. Missing fields, nulls, empty lists and blank strings inherit; `false` and zero override.
+Fields merge in this order: bundled default → bundled country → user default → user country. Your global defaults can override the bundled DE/FI/FR rules. Missing fields, nulls, empty lists and blank strings inherit; `false` and zero override. For `rejectNamePrefixes`, an empty list clears inherited prefixes.
 
 For example, to prefer municipality boundaries in Croatia:
 
@@ -139,10 +139,12 @@ This prefers `county`, then the largest bounding box when other city rankings ti
 | `pointFallback` | `false` | Use nearby division points when no area supplies a city name |
 | `pointDistance` | `500` metres | Bound for division-point matching; zero disables it |
 | `cityOverrides` | none | Replace resolved city names |
+| `rejectNamePrefixes` | none | Skip names starting with a listed prefix |
+| `countryFrom` | none | Division subtype whose name replaces the country |
 
 Both subtype lists accept `country`, `dependency`, `region`, `macroregion`, `county`, `macrocounty`, `localadmin`, `locality`, `borough`, `macrohood`, `neighborhood` and `microhood`.
 
-Country keys use two-letter codes such as `HR`. Unknown fields, invalid country keys, unknown subtypes or tie-break modes, negative distances, city overrides with an empty `from` and malformed language codes fail when the file loads.
+`countryFrom` accepts the same subtype names. Country keys use two-letter codes such as `HR`. Unknown fields, invalid country keys, unknown subtypes or tie-break modes, negative distances, city overrides with an empty `from`, empty reject prefixes and malformed language codes fail when the file loads.
 
 Fallback distance is measured in degrees, not metres. Candidates' bounding boxes must still contain the point, and subtype preference ranks before distance. `pointDistance` is measured in metres. See [boundary selection](DESIGN.md#boundary-selection).
 
@@ -190,6 +192,44 @@ Where the resolver picks a name you do not want, rewrite it:
 `from` matches the resolved city name, including airport names. Matching ignores case. The first matching entry wins. Add `state` to distinguish places with the same name. An empty `to` clears the city, so the result falls back to the state, then the country.
 
 Overrides apply only to resolved city names. They leave state and country fields unchanged, including names used as fallbacks for an empty city. `lookup` reports each rewrite on an `override:` line, and `status` counts the entries in each profile.
+
+### Skipping names
+
+The German profile prefers counties to name photos in Stuttgart or Munich after the city. This can give rural photos a district name such as `Landkreis Oberallgäu` instead of `Oberstdorf`. To skip these names and use the next candidate in the ranking:
+
+```json
+{
+  "countryOverrides": {
+    "DE": {
+      "rejectNamePrefixes": ["Landkreis ", "Kreis "]
+    }
+  }
+}
+```
+
+No prefixes are rejected by default. If you set prefixes in `defaultProfile`, use `"rejectNamePrefixes": []` in a country override to clear the inherited list.
+
+Matching ignores case. `ß` matches `ẞ`, but not `SS`. Write prefixes in your chosen name language. The trailing space in `Kreis ` rejects `Kreis Steinfurt` but keeps the municipality `Kreischa`.
+
+Prefixes apply to city, state and airport names, including nearby place names used as fallbacks. They also apply to country names chosen with `countryFrom`, but leave the default country name unchanged. `lookup` marks rejected candidates with `name rejected, prefix "Landkreis "`.
+
+### Naming the country after a region
+
+To use Scotland as the country name, set `countryFrom` to `region` for GB:
+
+```json
+{
+  "countryOverrides": {
+    "GB": {
+      "countryFrom": "region"
+    }
+  }
+}
+```
+
+An Edinburgh photo changes from `Old Town, Scotland, United Kingdom` to `Old Town, City of Edinburgh, Scotland`. Scotland is used only for the country field, leaving City of Edinburgh as the state.
+
+Keep this setting under `GB`, even when the country field reads Scotland. If no matching region contains the photo, or its name is missing or rejected, the original country name stays. `lookup` shows the change on a `country:` line and marks the selected region `country`.
 
 ### Languages
 
