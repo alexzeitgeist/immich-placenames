@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -173,6 +174,134 @@ type File struct {
 	size       int64
 	mu         sync.Mutex
 	geoms      []*geo.Geometry
+	once       sync.Once
+	grid       *grid
+}
+
+const gridCells = 16384
+
+// Limit duplicate entries from overlapping boxes and total index memory.
+const (
+	gridEntriesPerRow = 16
+	gridMaxEntries    = 16 * 1024 * 1024 // 64 MiB
+)
+
+// grid lists overlapping rows in each cell, in row order.
+// Callers must still test each row's box.
+type grid struct {
+	bbox   geo.Bbox
+	nx, ny int
+	dx, dy float64
+	start  []int32 // nx*ny+1 offsets into rows
+	rows   []int32
+}
+
+// usable reports whether the box can hold a point; NaN bounds cannot.
+func usable(b geo.Bbox) bool { return b.XMin <= b.XMax && b.YMin <= b.YMax }
+
+// column maps v to a cell along one axis. Clamp before converting to int
+// to handle NaN and out-of-range quotients.
+func column(v, lo, step float64, n int) int {
+	switch i := (v - lo) / step; {
+	case !(i > 0):
+		return 0
+	case i >= float64(n):
+		return n - 1
+	default:
+		return int(i)
+	}
+}
+
+// each calls f for every cell the box overlaps. Rounding is monotone, so a box
+// holding the point always covers the point's cell.
+func (g *grid) each(b geo.Bbox, f func(cell int)) {
+	if !usable(b) {
+		return
+	}
+	x0 := column(b.XMin, g.bbox.XMin, g.dx, g.nx)
+	x1 := column(b.XMax, g.bbox.XMin, g.dx, g.nx)
+	y0 := column(b.YMin, g.bbox.YMin, g.dy, g.ny)
+	y1 := column(b.YMax, g.bbox.YMin, g.dy, g.ny)
+	for y := y0; y <= y1; y++ {
+		for x := x0; x <= x1; x++ {
+			f(y*g.nx + x)
+		}
+	}
+}
+
+// cell returns the rows in the point's cell, or nil outside the grid.
+func (g *grid) cell(lon, lat float64) []int32 {
+	if g.nx == 0 || !g.bbox.Contains(lon, lat) {
+		return nil
+	}
+	c := column(lat, g.bbox.YMin, g.dy, g.ny)*g.nx + column(lon, g.bbox.XMin, g.dx, g.nx)
+	return g.rows[g.start[c]:g.start[c+1]]
+}
+
+// newGrid coarsens the grid to fit the entry budget. Nil means callers must scan.
+func newGrid(rows []Row) *grid {
+	return newGridWithBudget(rows, gridMaxEntries)
+}
+
+func newGridWithBudget(rows []Row, maxEntries int) *grid {
+	if len(rows) > math.MaxInt32 {
+		return nil
+	}
+	b, count := geo.Bbox{XMin: math.Inf(1), YMin: math.Inf(1), XMax: math.Inf(-1), YMax: math.Inf(-1)}, 0
+	for i := range rows {
+		if usable(rows[i].Bbox) {
+			b, count = b.Union(rows[i].Bbox), count+1
+		}
+	}
+	if count == 0 {
+		return &grid{}
+	}
+	budget := int(min(int64(count)*gridEntriesPerRow, int64(min(maxEntries, gridMaxEntries))))
+	// Even a one-cell grid needs one entry per usable row.
+	if count > budget {
+		return nil
+	}
+	n := max(1, int(math.Sqrt(float64(min(count, gridCells)))))
+	var g *grid
+	for {
+		g = &grid{bbox: b, nx: n, ny: n,
+			dx: (b.XMax - b.XMin) / float64(n), dy: (b.YMax - b.YMin) / float64(n),
+			start: make([]int32, n*n+1)}
+		entries, overBudget := 0, false
+		for i := range rows {
+			g.each(rows[i].Bbox, func(c int) {
+				if entries == budget {
+					overBudget = true
+					return
+				}
+				g.start[c+1]++
+				entries++
+			})
+			if overBudget {
+				break
+			}
+		}
+		if !overBudget {
+			break
+		}
+		if n == 1 {
+			return nil
+		}
+		n /= 2
+	}
+	// The budget bounds every count and prefix sum below MaxInt32.
+	for c := 1; c < len(g.start); c++ {
+		g.start[c] += g.start[c-1]
+	}
+	g.rows = make([]int32, g.start[n*n])
+	next := make([]int32, n*n)
+	for i := range rows {
+		g.each(rows[i].Bbox, func(c int) {
+			g.rows[g.start[c]+next[c]] = int32(i)
+			next[c]++
+		})
+	}
+	return g
 }
 
 func invalid(path string, msg string) error {
@@ -256,11 +385,21 @@ func (c *File) Size() int64 { return c.size }
 func (c *File) Close() error { return c.f.Close() }
 
 // Candidates returns the indices of rows whose bbox contains the point.
+// It builds a grid on first use, falling back to a scan if the grid cannot fit.
 func (c *File) Candidates(lon, lat float64) []int {
+	c.once.Do(func() { c.grid = newGrid(c.Rows) })
 	var out []int
-	for i := range c.Rows {
+	if c.grid == nil {
+		for i := range c.Rows {
+			if c.Rows[i].Bbox.Contains(lon, lat) {
+				out = append(out, i)
+			}
+		}
+		return out
+	}
+	for _, i := range c.grid.cell(lon, lat) {
 		if c.Rows[i].Bbox.Contains(lon, lat) {
-			out = append(out, i)
+			out = append(out, int(i))
 		}
 	}
 	return out

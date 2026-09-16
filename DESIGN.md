@@ -14,7 +14,9 @@ Distance checks use the edge tolerance for countries and airports. Divisions use
 
 For division points, the resolver first searches a square covering the spherical circle of radius `pointDistance`. The search wraps longitude at the antimeridian and includes all longitudes if the circle reaches a pole. It then checks each label's great-circle distance against the metre limit. `lookup` searches a window based on twice that limit to show nearby rejected labels; the selection limit stays the same.
 
-Decoding allocates the polygon boxes once. Geometry lookups reuse them to skip boundary scans without allocating.
+The resolver keeps spatial indexes in memory to avoid scanning every cached boundary for each photo. It builds them on first use and reuses them for later photos in the same run. Within each boundary, lookups also skip groups of segments that cannot affect containment or distance. Lookups still check the candidate boundaries before choosing a name.
+
+Each cache file's grid stores at most 64 MiB of row references. Files with heavily overlapping boundaries use a coarser grid to limit memory use. If the index cannot fit within its limits, lookups scan the file's rows instead.
 
 Matches within the edge tolerance rank the same as exact containment. Candidates rank as follows:
 

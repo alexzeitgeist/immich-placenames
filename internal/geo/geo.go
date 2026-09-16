@@ -25,11 +25,21 @@ func (b Bbox) Contains(lon, lat float64) bool {
 	return lon >= b.XMin && lon <= b.XMax && lat >= b.YMin && lat <= b.YMax
 }
 
-// Distance is the planar distance in degrees from the point to the box, zero inside.
-func (b Bbox) Distance(lon, lat float64) float64 {
-	dx := math.Max(0, math.Max(b.XMin-lon, lon-b.XMax))
-	dy := math.Max(0, math.Max(b.YMin-lat, lat-b.YMax))
-	return math.Hypot(dx, dy)
+// distanceSq is the squared planar distance in degrees from the point to the
+// box, zero inside.
+func (b Bbox) distanceSq(lon, lat float64) float64 {
+	dx, dy := 0.0, 0.0
+	if lon < b.XMin {
+		dx = b.XMin - lon
+	} else if lon > b.XMax {
+		dx = lon - b.XMax
+	}
+	if lat < b.YMin {
+		dy = b.YMin - lat
+	} else if lat > b.YMax {
+		dy = lat - b.YMax
+	}
+	return dx*dx + dy*dy
 }
 
 // Intersects reports whether the boxes overlap or touch.
@@ -51,11 +61,20 @@ func (b Bbox) Union(o Bbox) Bbox {
 // Expand grows the box by d on every side.
 func (b Bbox) Expand(d float64) Bbox { return Bbox{b.XMin - d, b.YMin - d, b.XMax + d, b.YMax + d} }
 
+// chunkSize is the number of consecutive segments per box.
+const chunkSize = 64
+
+// ring stores x0,y0,x1,y1,... with one box per chunk of segments.
+type ring struct {
+	pts   []float64
+	boxes []Bbox
+}
+
 // Geometry is a decoded WKB geometry: polygons with holes, lines and points.
 type Geometry struct {
-	polys  [][][]float64 // polygon → ring → x0,y0,x1,y1,...; the first ring is the outer one
-	boxes  []Bbox        // one box per polygon
-	lines  [][]float64
+	polys  [][]ring // polygon → ring; the first ring is the outer one
+	boxes  []Bbox   // one box per polygon
+	lines  []ring
 	points []float64
 	bbox   Bbox
 	empty  bool
@@ -96,32 +115,46 @@ func (g *Geometry) Distance(lon, lat float64) float64 {
 	return g.distanceWithin(lon, lat, math.Inf(1))
 }
 
-// distanceWithin returns +Inf beyond bound. Polygon boxes give a lower bound
-// on edge distance, so polygons beyond min(d, bound) can be skipped.
+// distanceWithin returns +Inf beyond bound. Polygon and chunk boxes give
+// lower bounds on edge distance. Round the squared limit up so pruning cannot
+// reject a distance that passes the final comparison after taking its root.
 func (g *Geometry) distanceWithin(lon, lat, bound float64) float64 {
-	d := math.Inf(1)
+	d, limit := math.Inf(1), math.Nextafter(bound*bound, math.Inf(1))
 	for i, poly := range g.polys {
-		if g.boxes[i].Distance(lon, lat) > math.Min(d, bound) {
+		if g.boxes[i].distanceSq(lon, lat) > limit {
 			continue
 		}
-		for _, ring := range poly {
-			d = math.Min(d, ringDistance(ring, lon, lat))
+		for _, r := range poly {
+			if v := ringDistance(r, lon, lat, limit); v < d {
+				d = v
+				if v < limit {
+					limit = v
+				}
+			}
 		}
 	}
-	for _, line := range g.lines {
-		d = math.Min(d, lineDistance(line, lon, lat))
+	for _, l := range g.lines {
+		if v := lineDistance(l, lon, lat, limit); v < d {
+			d = v
+			if v < limit {
+				limit = v
+			}
+		}
 	}
 	for i := 0; i+1 < len(g.points); i += 2 {
-		d = math.Min(d, math.Hypot(g.points[i]-lon, g.points[i+1]-lat))
+		dx, dy := g.points[i]-lon, g.points[i+1]-lat
+		if v := dx*dx + dy*dy; v < d {
+			d = v
+		}
 	}
-	if d > bound {
+	if d = math.Sqrt(d); d > bound {
 		return math.Inf(1)
 	}
 	return d
 }
 
 // polygonContains is even-odd ray casting over every ring, so holes cancel the outer ring.
-func polygonContains(rings [][]float64, x, y float64) bool {
+func polygonContains(rings []ring, x, y float64) bool {
 	inside := false
 	for _, r := range rings {
 		if ringCrosses(r, x, y) {
@@ -131,52 +164,95 @@ func polygonContains(rings [][]float64, x, y float64) bool {
 	return inside
 }
 
-// ringCrosses reports whether a ray from the point towards +x crosses the ring an odd number of times.
-func ringCrosses(r []float64, x, y float64) bool {
-	n := len(r) / 2
-	odd := false
-	for i, j := 0, n-1; i < n; j, i = i, i+1 {
-		xi, yi := r[2*i], r[2*i+1]
-		xj, yj := r[2*j], r[2*j+1]
-		if (yi > y) != (yj > y) && x < (xj-xi)*(y-yi)/(yj-yi)+xi {
-			odd = !odd
+// ringCrosses reports whether a ray towards +x crosses the ring an odd number of times.
+func ringCrosses(r ring, x, y float64) bool {
+	n := len(r.pts) / 2
+	if n < 2 {
+		return false
+	}
+	segs, odd := n-1, false
+	for c, b := range r.boxes {
+		if b.YMin > y || b.YMax <= y || b.XMax <= x {
+			continue
 		}
+		for i, hi := c*chunkSize, min(c*chunkSize+chunkSize, segs); i < hi; i++ {
+			if crosses(r.pts[2*i], r.pts[2*i+1], r.pts[2*i+2], r.pts[2*i+3], x, y) {
+				odd = !odd
+			}
+		}
+	}
+	// Chunks exclude the closing segment from the last point to the first.
+	if crosses(r.pts[2*n-2], r.pts[2*n-1], r.pts[0], r.pts[1], x, y) {
+		odd = !odd
 	}
 	return odd
 }
 
+// crosses reports whether the segment passes the ray to the right of x.
+func crosses(ax, ay, bx, by, x, y float64) bool {
+	return (ay > y) != (by > y) && x < (bx-ax)*(y-ay)/(by-ay)+ax
+}
+
 // ringDistance closes the ring as containment does, so an unclosed ring
 // measures the same shape both ways; a closed one adds a zero-length segment.
-func ringDistance(r []float64, x, y float64) float64 {
-	d := lineDistance(r, x, y)
-	if n := len(r) / 2; n > 1 {
-		d = math.Min(d, segmentDistance(r[2*n-2], r[2*n-1], r[0], r[1], x, y))
+// Distances are squared, as in distanceWithin.
+func ringDistance(r ring, x, y, limit float64) float64 {
+	d := lineDistance(r, x, y, limit)
+	if n := len(r.pts) / 2; n > 1 {
+		if v := segmentDistance(r.pts[2*n-2], r.pts[2*n-1], r.pts[0], r.pts[1], x, y); v < d {
+			d = v
+		}
 	}
 	return d
 }
 
-func lineDistance(l []float64, x, y float64) float64 {
-	n := len(l) / 2
+// lineDistance returns a squared distance, skipping chunks beyond limit
+// or the nearest segment found so far.
+func lineDistance(l ring, x, y, limit float64) float64 {
+	n := len(l.pts) / 2
 	switch n {
 	case 0:
 		return math.Inf(1)
 	case 1:
-		return math.Hypot(l[0]-x, l[1]-y)
+		dx, dy := l.pts[0]-x, l.pts[1]-y
+		return dx*dx + dy*dy
 	}
-	d := math.Inf(1)
-	for i := 0; i+1 < n; i++ {
-		d = math.Min(d, segmentDistance(l[2*i], l[2*i+1], l[2*i+2], l[2*i+3], x, y))
+	segs, d := n-1, math.Inf(1)
+	for c, b := range l.boxes {
+		if b.distanceSq(x, y) > limit {
+			continue
+		}
+		for i, hi := c*chunkSize, min(c*chunkSize+chunkSize, segs); i < hi; i++ {
+			if v := segmentDistance(l.pts[2*i], l.pts[2*i+1], l.pts[2*i+2], l.pts[2*i+3], x, y); v < d {
+				d = v
+				if v < limit {
+					limit = v
+				}
+			}
+		}
 	}
 	return d
 }
 
+// segmentDistance is the squared planar distance from the point to the segment.
 func segmentDistance(ax, ay, bx, by, x, y float64) float64 {
 	dx, dy := bx-ax, by-ay
-	t := 0.0
+	px, py := ax, ay
 	if l2 := dx*dx + dy*dy; l2 > 0 {
-		t = math.Max(0, math.Min(1, ((x-ax)*dx+(y-ay)*dy)/l2))
+		t := ((x-ax)*dx + (y-ay)*dy) / l2
+		switch {
+		case t >= 1:
+			// Use the stored endpoint: ax+(bx-ax) can round outside
+			// the box and invalidate its distance lower bound.
+			px, py = bx, by
+		case t > 0:
+			// Keep rounded interior projections inside the box too.
+			px = max(min(ax, bx), min(max(ax, bx), ax+t*dx))
+			py = max(min(ay, by), min(max(ay, by), ay+t*dy))
+		}
 	}
-	return math.Hypot(ax+t*dx-x, ay+t*dy-y)
+	px, py = px-x, py-y
+	return px*px + py*py
 }
 
 const earthRadius = 6371000 // metres
@@ -334,13 +410,13 @@ func (d *decoder) geometry() error {
 		if err != nil {
 			return err
 		}
-		d.g.lines = append(d.g.lines, c)
+		d.g.lines = append(d.g.lines, ring{pts: c})
 	case wkbPolygon:
 		nr, err := d.u32(bo)
 		if err != nil {
 			return err
 		}
-		var rings [][]float64
+		var rings []ring
 		for i := uint32(0); i < nr; i++ {
 			n, err := d.u32(bo)
 			if err != nil {
@@ -350,7 +426,7 @@ func (d *decoder) geometry() error {
 			if err != nil {
 				return err
 			}
-			rings = append(rings, c)
+			rings = append(rings, ring{pts: c})
 		}
 		if len(rings) > 0 {
 			d.g.polys = append(d.g.polys, rings)
@@ -371,27 +447,49 @@ func (d *decoder) geometry() error {
 	return nil
 }
 
-// finish records a box for each polygon and the geometry's own box.
+// finish builds the chunk, polygon and geometry boxes.
 func (g *Geometry) finish() {
 	none := Bbox{math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)}
 	b := none
 	g.boxes = make([]Bbox, len(g.polys))
 	for i, poly := range g.polys {
 		pb := none
-		for _, r := range poly {
-			pb = grow(pb, r)
+		for j := range poly {
+			var rb Bbox
+			poly[j].boxes, rb = chunks(poly[j].pts)
+			pb = pb.Union(rb)
 		}
 		g.boxes[i] = pb
 		b = b.Union(pb)
 	}
-	for _, l := range g.lines {
-		b = grow(b, l)
+	for i := range g.lines {
+		var rb Bbox
+		g.lines[i].boxes, rb = chunks(g.lines[i].pts)
+		b = b.Union(rb)
 	}
 	b = grow(b, g.points)
 	g.empty = math.IsInf(b.XMin, 1)
 	if !g.empty {
 		g.bbox = b
 	}
+}
+
+// chunks returns one box per chunkSize segments and their union.
+func chunks(pts []float64) ([]Bbox, Bbox) {
+	none := Bbox{math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)}
+	n := len(pts) / 2
+	if n < 2 {
+		return nil, grow(none, pts)
+	}
+	segs := n - 1
+	out, all := make([]Bbox, (segs+chunkSize-1)/chunkSize), none
+	for c := range out {
+		// Segments [lo, hi) need points [lo, hi].
+		lo, hi := c*chunkSize, min(c*chunkSize+chunkSize, segs)
+		out[c] = grow(none, pts[2*lo:2*hi+2])
+		all = all.Union(out[c])
+	}
+	return out, all
 }
 
 // grow extends the box to cover the x,y pairs in c.

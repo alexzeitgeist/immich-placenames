@@ -131,6 +131,187 @@ func TestInterruptedWriteLeavesNoFile(t *testing.T) {
 	}
 }
 
+func scan(rows []Row, lon, lat float64) []int {
+	var out []int
+	for i := range rows {
+		if rows[i].Bbox.Contains(lon, lat) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func TestCandidatesMatchScan(t *testing.T) {
+	var rs []Row
+	add := func(b geo.Bbox) { rs = append(rs, Row{ID: strconv.Itoa(len(rs)), Bbox: b}) }
+	for x := -40.0; x <= 40; x += 3.5 {
+		for y := -20.0; y <= 20; y += 2.5 {
+			add(geo.Bbox{XMin: x, YMin: y, XMax: x + 1.25, YMax: y + 0.75})
+		}
+	}
+	add(geo.Bbox{XMin: -180, YMin: -90, XMax: 180, YMax: 90}) // covers every cell
+	add(geo.Bbox{XMin: 0, YMin: 0, XMax: 0, YMax: 0})         // no area
+	add(geo.Bbox{XMin: -40, YMin: -20, XMax: -40, YMax: 20})  // no width
+	add(geo.Bbox{XMin: 5, YMin: 5, XMax: 6, YMax: 6})
+	add(geo.Bbox{XMin: 5, YMin: 5, XMax: 6, YMax: 6}) // same box twice
+	f := &File{Rows: rs}
+	g := newGrid(rs)
+	if g.nx < 4 {
+		t.Fatalf("%d rows in a %dx%d grid: too coarse to test", len(rs), g.nx, g.ny)
+	}
+	var xs, ys []float64
+	for k := range g.nx + 1 {
+		// Cell edges, and either side of them.
+		e := g.bbox.XMin + float64(k)*g.dx
+		xs = append(xs, e, math.Nextafter(e, -200), math.Nextafter(e, 200))
+		e = g.bbox.YMin + float64(k)*g.dy
+		ys = append(ys, e, math.Nextafter(e, -200), math.Nextafter(e, 200))
+	}
+	for x := -45.0; x <= 45; x += 1.1 {
+		xs = append(xs, x)
+	}
+	for y := -25.0; y <= 25; y += 1.3 {
+		ys = append(ys, y)
+	}
+	xs = append(xs, -180, 180, math.NaN(), math.Inf(1), math.Inf(-1))
+	ys = append(ys, -90, 90, math.NaN(), math.Inf(1), math.Inf(-1))
+	for _, x := range xs {
+		for _, y := range ys {
+			if got, want := f.Candidates(x, y), scan(rs, x, y); !reflect.DeepEqual(got, want) {
+				t.Fatalf("(%v,%v): got %v, want %v", x, y, got, want)
+			}
+		}
+	}
+	if c := (&File{}).Candidates(0, 0); c != nil {
+		t.Errorf("no rows: %v", c)
+	}
+}
+
+// Including a NaN box in the grid's union would reject every query.
+func TestCandidatesIgnoreUnusableBoxes(t *testing.T) {
+	nan, inf := math.NaN(), math.Inf(1)
+	for name, bad := range map[string]geo.Bbox{
+		"nan":      {XMin: nan, YMin: nan, XMax: nan, YMax: nan},
+		"nan max":  {XMin: 0, YMin: 0, XMax: nan, YMax: 1},
+		"inverted": {XMin: 5, YMin: 5, XMax: -5, YMax: -5},
+		"infinite": {XMin: -inf, YMin: -inf, XMax: inf, YMax: inf},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rs := []Row{{ID: "bad", Bbox: bad}, {ID: "a", Bbox: geo.Bbox{XMin: 1, YMin: 2, XMax: 3, YMax: 4}}}
+			f := &File{Rows: rs}
+			for _, p := range [][2]float64{{2, 3}, {1, 2}, {3, 4}, {0, 0}, {9, 9}, {nan, 3}} {
+				if got, want := f.Candidates(p[0], p[1]), scan(rs, p[0], p[1]); !reflect.DeepEqual(got, want) {
+					t.Errorf("(%v,%v): got %v, want %v", p[0], p[1], got, want)
+				}
+			}
+		})
+	}
+	if c := (&File{Rows: []Row{{Bbox: geo.Bbox{XMin: math.NaN()}}}}).Candidates(0, 0); c != nil {
+		t.Errorf("only an unusable row: %v", c)
+	}
+}
+
+func TestCandidatesOverlappingBoxes(t *testing.T) {
+	for count, wantN := range map[int]int{16: 4, 25: 2, 131072: 4} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			// At 16 rows every row covers 16 cells, exactly the budget.
+			// At 25 rows the grid coarsens once; at 131072 it coarsens
+			// repeatedly instead of overflowing the old int32 prefix sum.
+			rows := make([]Row, count+2)
+			for i := range count {
+				rows[i].Bbox = geo.Bbox{XMin: 0, YMin: 0, XMax: 1, YMax: 1}
+			}
+			rows[count].Bbox = geo.Bbox{XMin: math.NaN()}
+			rows[count+1].Bbox = geo.Bbox{XMin: 1, XMax: -1}
+			f := &File{Rows: rows}
+			for _, p := range [][2]float64{{0.5, 0.5}, {0, 0}, {1, 1}, {2, 0.5}, {math.NaN(), 0.5}, {math.Inf(1), 0.5}} {
+				if got, want := f.Candidates(p[0], p[1]), scan(rows, p[0], p[1]); !reflect.DeepEqual(got, want) {
+					t.Fatalf("(%v,%v): candidates differ from scan (lengths %d and %d)", p[0], p[1], len(got), len(want))
+				}
+			}
+			if f.grid == nil {
+				t.Fatal("no grid for overlapping boxes")
+			}
+			if f.grid.nx != wantN || f.grid.ny != wantN {
+				t.Fatalf("grid = %dx%d, want %dx%d", f.grid.nx, f.grid.ny, wantN, wantN)
+			}
+			if len(f.grid.rows) > min(count*gridEntriesPerRow, gridMaxEntries) {
+				t.Fatalf("%d entries exceed the budget", len(f.grid.rows))
+			}
+		})
+	}
+}
+
+func TestCandidatesConcurrentFirstUse(t *testing.T) {
+	var rs []Row
+	for i := range 256 {
+		x := float64(i)
+		rs = append(rs, Row{Bbox: geo.Bbox{XMin: x, YMin: 0, XMax: x + 2, YMax: 2}})
+	}
+	f := &File{Rows: rs}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			for j := range 32 {
+				x := float64(i*16+j) - 1
+				if got, want := f.Candidates(x, 1), scan(rs, x, 1); !reflect.DeepEqual(got, want) {
+					t.Errorf("(%g,1): got %v, want %v", x, got, want)
+					return
+				}
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+}
+
+func TestCandidatesGridBudget(t *testing.T) {
+	rows := make([]Row, 64)
+	for i := range rows {
+		// Mix broad and small boxes to test coarsening, filtering and row order.
+		rows[i].Bbox = geo.Bbox{XMin: 0, YMin: 0, XMax: 4, YMax: 4}
+		if i%2 != 0 {
+			x, y := float64(i%4), float64((i/4)%4)
+			rows[i].Bbox = geo.Bbox{XMin: x, YMin: y, XMax: x + 0.5, YMax: y + 0.5}
+		}
+	}
+	for _, tc := range []struct {
+		name          string
+		budget, wantN int
+	}{
+		{"coarsen", 1024, 4},
+		{"one cell", 64, 1},
+		{"cannot fit one cell", 63, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &File{Rows: rows}
+			f.once.Do(func() { f.grid = newGridWithBudget(rows, tc.budget) })
+			if tc.wantN == 0 {
+				if f.grid != nil {
+					t.Fatal("expected scan fallback")
+				}
+			} else if f.grid == nil || f.grid.nx != tc.wantN || f.grid.ny != tc.wantN || len(f.grid.rows) > tc.budget {
+				t.Fatalf("grid does not meet dimension %d and budget %d", tc.wantN, tc.budget)
+			}
+			coords := []float64{-1, 0, 0.25, 0.5, 1, 2, 3, 4, 5, math.NaN(), math.Inf(-1), math.Inf(1)}
+			for _, edge := range []float64{0, 1, 2, 3, 4} {
+				coords = append(coords, math.Nextafter(edge, math.Inf(-1)), math.Nextafter(edge, math.Inf(1)))
+			}
+			for _, x := range coords {
+				for _, y := range coords {
+					if got, want := f.Candidates(x, y), scan(rows, x, y); !reflect.DeepEqual(got, want) {
+						t.Fatalf("(%v,%v): got %v, want %v", x, y, got, want)
+					}
+				}
+			}
+		})
+	}
+}
+
 // Writers of one destination in one process get their own temporary files;
 // the last rename wins with a complete file. All four hold their files open
 // before any writes, so a shared name would collide.

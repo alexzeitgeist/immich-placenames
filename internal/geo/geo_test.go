@@ -27,6 +27,22 @@ func encodePolygon(bo binary.AppendByteOrder, rings ...[]float64) []byte {
 	return b
 }
 
+// encodeLine encodes one line string as WKB.
+func encodeLine(bo binary.AppendByteOrder, pts []float64) []byte {
+	var b []byte
+	if bo == binary.BigEndian {
+		b = append(b, 0)
+	} else {
+		b = append(b, 1)
+	}
+	b = bo.AppendUint32(b, wkbLineString)
+	b = bo.AppendUint32(b, uint32(len(pts)/2))
+	for _, v := range pts {
+		b = bo.AppendUint64(b, math.Float64bits(v))
+	}
+	return b
+}
+
 func wkbMulti(bo binary.AppendByteOrder, t uint32, parts ...[]byte) []byte {
 	var b []byte
 	if bo == binary.BigEndian {
@@ -204,6 +220,172 @@ func TestLocate(t *testing.T) {
 	}
 }
 
+// Endpoint reconstruction used to round 0.2 past its box, making Distance
+// smaller than the pruning lower bound and Locate reject that same distance.
+func TestLocateNearSegmentEndpoints(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		pts      []float64
+		vertical bool
+	}{
+		{"forward", []float64{-0.1, 0, 0.2, 0}, false},
+		{"reverse", []float64{0.2, 0, -0.1, 0}, false},
+		{"vertical", []float64{0, -0.1, 0, 0.2}, true},
+		{"vertical reverse", []float64{0, 0.2, 0, -0.1}, true},
+		{"degenerate", []float64{0.2, 0, 0.2, 0}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, err := Decode(encodeLine(binary.LittleEndian, tc.pts))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, q := range []float64{0.2, 0.201, math.Nextafter(0.20015, 0), 0.20015, math.Nextafter(0.20015, math.Inf(1))} {
+				x, y := q, 0.0
+				if tc.vertical {
+					x, y = y, x
+				}
+				want := q - 0.2
+				d := g.Distance(x, y)
+				if d != want {
+					t.Errorf("(%g,%g): Distance = %.18g, want %.18g", x, y, d, want)
+				}
+				if _, bounded := g.Locate(x, y, d); bounded != d {
+					t.Errorf("(%g,%g): Locate rejected reported distance %.18g: got %.18g", x, y, d, bounded)
+				}
+				wantIn := want <= Tolerance
+				for _, bound := range []float64{math.Inf(1), want, 0} {
+					wantD := want
+					if want > math.Max(bound, Tolerance) {
+						wantD = math.Inf(1)
+					}
+					if in, d := g.Locate(x, y, bound); in != wantIn || d != wantD {
+						t.Errorf("(%g,%g) bound %.18g: Locate = %v %.18g, want %v %.18g", x, y, bound, in, d, wantIn, wantD)
+					}
+				}
+			}
+		})
+	}
+}
+
+// scanRing measures every segment, closing the run when closed is set.
+func scanRing(pts []float64, x, y float64, closed bool) float64 {
+	n := len(pts) / 2
+	switch n {
+	case 0:
+		return math.Inf(1)
+	case 1:
+		dx, dy := pts[0]-x, pts[1]-y
+		return dx*dx + dy*dy
+	}
+	d := math.Inf(1)
+	for i := 0; i+1 < n; i++ {
+		d = math.Min(d, segmentDistance(pts[2*i], pts[2*i+1], pts[2*i+2], pts[2*i+3], x, y))
+	}
+	if closed {
+		d = math.Min(d, segmentDistance(pts[2*n-2], pts[2*n-1], pts[0], pts[1], x, y))
+	}
+	return d
+}
+
+// fullScan checks containment and edge distance without pruning.
+func fullScan(g *Geometry, x, y float64) (bool, float64) {
+	in := false
+	for _, poly := range g.polys {
+		inside := false
+		for _, r := range poly {
+			n := len(r.pts) / 2
+			odd := false
+			for i, j := 0, n-1; i < n; j, i = i, i+1 {
+				if crosses(r.pts[2*j], r.pts[2*j+1], r.pts[2*i], r.pts[2*i+1], x, y) {
+					odd = !odd
+				}
+			}
+			inside = inside != odd
+		}
+		in = in || inside
+	}
+	d := math.Inf(1)
+	for _, poly := range g.polys {
+		for _, r := range poly {
+			d = math.Min(d, scanRing(r.pts, x, y, true))
+		}
+	}
+	for _, l := range g.lines {
+		d = math.Min(d, scanRing(l.pts, x, y, false))
+	}
+	for i := 0; i+1 < len(g.points); i += 2 {
+		dx, dy := g.points[i]-x, g.points[i+1]-y
+		d = math.Min(d, dx*dx+dy*dy)
+	}
+	return in, math.Sqrt(d)
+}
+
+func TestChunkBoundariesMatchFullScan(t *testing.T) {
+	for _, n := range []int{0, 1, 2, chunkSize, chunkSize + 1, chunkSize + 2, 2 * chunkSize, 2*chunkSize + 1, 2*chunkSize + 2} {
+		pts := circle(0, 0, 10, max(n, 1))[:2*n]
+		// Leave the polygon unclosed to check its closing edge separately.
+		for _, wkb := range [][]byte{encodeLine(binary.LittleEndian, pts), encodePolygon(binary.LittleEndian, pts)} {
+			g, err := Decode(wkb)
+			if err != nil {
+				t.Fatal(err)
+			}
+			queries := [][2]float64{{0, 0}, {11, 1}, {-11, -1}}
+			for i := 0; i < len(pts); i += 2 {
+				queries = append(queries, [2]float64{pts[i], pts[i+1]}, [2]float64{pts[i] + 0.001, pts[i+1]})
+			}
+			for _, p := range queries {
+				inside, edge := fullScan(g, p[0], p[1])
+				if d := g.Distance(p[0], p[1]); d != edge {
+					t.Fatalf("%d points, type %d, %v: Distance %g, want %g", n, wkb[1], p, d, edge)
+				}
+				want := edge
+				if inside {
+					want = 0
+				}
+				if in, d := g.Locate(p[0], p[1], edge); in != (inside || edge <= Tolerance) || d != want {
+					t.Fatalf("%d points, type %d, %v: Locate %v %g, want %v %g", n, wkb[1], p, in, d, inside || edge <= Tolerance, want)
+				}
+			}
+		}
+	}
+}
+
+func TestChunkedScanMatchesFullScan(t *testing.T) {
+	poly := encodePolygon(binary.LittleEndian, circle(0, 0, 10, 11*chunkSize), circle(2, 1, 3, 5*chunkSize))
+	line := encodeLine(binary.BigEndian, circle(-20, 0, 4, 3*chunkSize))
+	g, err := Decode(wkbMulti(binary.LittleEndian, wkbGeometryCollection, poly, line))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range append(slices.Clone(g.polys[0]), g.lines...) {
+		if len(r.boxes) < 3 {
+			t.Fatalf("%d points in %d chunks", len(r.pts)/2, len(r.boxes))
+		}
+	}
+	// Sample inside and outside the rings and hole, away from vertices and edges.
+	for x := -26.03; x < 13; x += 0.53 {
+		for y := -12.07; y < 13; y += 0.61 {
+			inside, edge := fullScan(g, x, y)
+			wantIn, want := inside || edge <= Tolerance, edge
+			if inside {
+				want = 0
+			}
+			if in, d := g.Locate(x, y, math.Inf(1)); in != wantIn || !near(d, want) {
+				t.Fatalf("(%g,%g): %v %.9f, want %v %.9f", x, y, in, d, wantIn, want)
+			}
+			if d := g.Distance(x, y); !near(d, edge) {
+				t.Fatalf("(%g,%g) edge distance %.9f, want %.9f", x, y, d, edge)
+			}
+			if in, d := g.Locate(x, y, want); in != wantIn || !near(d, want) {
+				t.Fatalf("(%g,%g) bound at the distance: %v %.9f, want %v %.9f", x, y, in, d, wantIn, want)
+			}
+			if in, d := g.Locate(x, y, 0.99*edge); !inside && edge > 2*Tolerance && (in || !math.IsInf(d, 1)) {
+				t.Fatalf("(%g,%g) bound below the distance: %v %g", x, y, in, d)
+			}
+		}
+	}
+}
+
 // The geometry box spans the antimeridian gap; the polygon boxes exclude it.
 func TestPolygonBoxesSkipTheGap(t *testing.T) {
 	west := encodePolygon(binary.LittleEndian, []float64{-180, -10, -170, -10, -170, 10, -180, 10, -180, -10})
@@ -246,7 +428,7 @@ func perOp(n int, f func()) time.Duration {
 	return time.Since(start) / time.Duration(n)
 }
 
-// Compare bounded lookup with exact Distance, which also prunes polygons.
+// Use an unpruned reference; Distance also skips chunks.
 // The median reduces scheduling noise; the ratio allows for slower runners.
 func TestBoundedLocateSkipsDistantPolygons(t *testing.T) {
 	const polys, vertices = 128, 512
@@ -273,12 +455,12 @@ func TestBoundedLocateSkipsDistantPolygons(t *testing.T) {
 	ratios := make([]float64, 5)
 	for i := range ratios {
 		bounded := perOp(5000, func() { _, d := g.Locate(x, y, Tolerance); sink += d })
-		exact := perOp(20, func() { sink += g.Distance(x, y) })
-		ratios[i] = float64(exact) / float64(bounded)
+		full := perOp(20, func() { _, d := fullScan(g, x, y); sink += d })
+		ratios[i] = float64(full) / float64(bounded)
 	}
 	slices.Sort(ratios)
 	if ratio := ratios[len(ratios)/2]; ratio < 20 {
-		t.Errorf("exact distance / bounded locate median ratio %.1fx, want at least 20x: the polygon boxes are not skipping enough work", ratio)
+		t.Errorf("full scan / bounded locate median ratio %.1fx, want at least 20x: the boxes are not skipping enough work", ratio)
 	}
 }
 
