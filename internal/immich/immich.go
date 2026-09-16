@@ -187,6 +187,35 @@ WHERE e.latitude IS NOT NULL AND e.longitude IS NOT NULL AND a."deletedAt" IS NU
 	return n, err
 }
 
+const hasName = `(e.city IS NOT NULL OR e.state IS NOT NULL OR e.country IS NOT NULL)`
+
+// CountNames counts undeleted assets with any name and how many lock all three fields.
+func CountNames(ctx context.Context, q Querier) (named, locked int64, err error) {
+	err = q.QueryRow(ctx, `SELECT count(*) FILTER (WHERE `+hasName+`),
+count(*) FILTER (WHERE `+hasName+` AND e."lockedProperties" @> '{city,state,country}'::varchar[])
+FROM asset a JOIN asset_exif e ON e."assetId" = a.id WHERE a."deletedAt" IS NULL`).Scan(&named, &locked)
+	return named, locked, err
+}
+
+// ReverseGeocoding reads the setting stored in Immich's database.
+// A missing row or setting returns enabled=true (Immich's default), stored=false.
+// IMMICH_CONFIG_FILE can override this value without updating the database.
+func ReverseGeocoding(ctx context.Context, q Querier) (enabled, stored bool, err error) {
+	var value *bool
+	err = q.QueryRow(ctx, `SELECT (value->'reverseGeocoding'->>'enabled')::boolean
+FROM system_metadata WHERE key = 'system-config'`).Scan(&value)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	if value == nil {
+		return true, false, nil
+	}
+	return *value, true, nil
+}
+
 // Update is one asset's names to write.
 type Update struct {
 	Asset
@@ -329,7 +358,7 @@ const clearSQL = `city = NULL, state = NULL, country = NULL,
 // named restricts a selection to rows with any of the three names or any of
 // their locks, so that a reset clears a lock left on a row whose names are
 // already null.
-const named = `(e.city IS NOT NULL OR e.state IS NOT NULL OR e.country IS NOT NULL OR e."lockedProperties" && '{city,state,country}'::varchar[])`
+const named = `(` + hasName + ` OR e."lockedProperties" && '{city,state,country}'::varchar[])`
 
 // Count reports how many rows Reset would clear.
 func Count(ctx context.Context, q Querier, s Selection) (int64, error) {

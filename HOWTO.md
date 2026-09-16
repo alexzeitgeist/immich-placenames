@@ -77,7 +77,13 @@ Writes commit in pages of 1000 selected assets. Use `-page-size N` to change thi
 
 If a run stops, earlier commits remain. Rerun normally to pick up unnamed assets; `-all` can overwrite names again. If the tool cannot confirm a commit, check the database before assuming it rolled back.
 
-`-lock` protects the three name fields from metadata extraction by adding them to Immich's `lockedProperties`. It is off by default and does not block `run -all`.
+Runs lock the city, state and country names they write so Immich's metadata extraction cannot overwrite them. Use `-lock=false` to skip adding locks; existing locks remain. Locks do not block `run -all`, and [`reset`](#reset-names) clears them with the names. Locking requires Immich v3.0.0 or later.
+
+A run locks only the assets it writes. To protect assets named by earlier runs, use `run -all`; this resolves and writes their names again using your current profiles. Preview with `run -dry-run -all` first. `status` counts named assets with and without locks.
+
+When Immich extracts metadata, it replaces unlocked `city`, `state` and `country` values with its own names if reverse geocoding is enabled, or clears them if it is disabled. Extraction runs on import. The Extract Metadata job, a per-asset metadata refresh, a replaced file or a rescanned library can trigger it again. Editing an asset's description, date, location or rating in Immich triggers a sidecar write that clears its locks, including these three.
+
+`run` reports the reverse geocoding setting stored in Immich's database. It warns if the setting is enabled or absent (Immich's default is enabled). If you use `IMMICH_CONFIG_FILE`, check the setting in that file; it overrides the value reported here. When reverse geocoding is enabled, Immich names assets on import. A run without `-all` skips those assets, leaving Immich's names in place.
 
 Add `-v` for debug logs:
 
@@ -404,7 +410,7 @@ Fetches use four workers by default. Try `-workers 2` if memory is tight. See [m
 
 ## Status and failures
 
-`status` lists each cache's release, row count, size, fetch time and available name languages, followed by effective profiles and the pending asset count. It does not fetch missing caches. Profile lines show the point-fallback setting, such as `points=true@500m`, and the number of city overrides as `cityOverrides=N` when configured. A city fallback other than the default appears as `cityFallback=[country]` or `cityFallback=[]`.
+`status` lists each cache's release, row count, size, fetch time and available name languages, followed by effective profiles and the pending asset count. It also counts named assets with and without locks and reports the reverse geocoding setting stored in Immich's database. It does not fetch missing caches. Profile lines show the point-fallback setting, such as `points=true@500m`, and the number of city overrides as `cityOverrides=N` when configured. A city fallback other than the default appears as `cityFallback=[country]` or `cityFallback=[]`.
 
 Exit codes are 0 for success, 2 for usage errors and 1 for operational failures. Exit 1 can follow successful writes to earlier pages.
 
@@ -421,6 +427,9 @@ Exit codes are 0 for success, 2 for usage errors and 1 for operational failures.
 | `no country` | Inspect the coordinates; points outside all country and dependency polygons remain unnamed |
 | `refetch failed, keeping the country polygons ...` | Retry the command or fetch `world` again |
 | `changed meanwhile` | An asset changed before its write; a later run may select it again |
+| `immich reverse geocoding` (INFO) | Disabled in the database. No change is needed if the running server also has it disabled; check for an `IMMICH_CONFIG_FILE` override |
+| `immich reverse geocoding` (WARN) | Enabled in the database, or no setting stored (the default is enabled). Check for an `IMMICH_CONFIG_FILE` override. If enabled on the server, disable it or expect new assets to keep Immich's names |
+| `immich reverse geocoding unread` | Diagnostic only; check the database user's access to `system_metadata` |
 | `N assets failed` | Check the per-asset errors; other assets may have been written |
 | `stopped after N confirmed writes in P committed pages` | Earlier commits remain; inspect the failure before rerunning |
 | `dry-run stopped` | Check selection, cancellation or output errors; no database writes were attempted |

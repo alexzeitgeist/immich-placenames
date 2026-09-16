@@ -15,7 +15,7 @@ You can choose which kinds of places to use for names. That might mean a municip
 
 ## Before you start
 
-The tool writes directly to Immich's PostgreSQL database. Back up the database and disable Immich's built-in reverse geocoding before using it to write names. It has been tested with Immich v3.1.0.
+The tool writes directly to Immich's PostgreSQL database. Back up the database and disable Immich's built-in reverse geocoding before using it to write names. Runs lock the names they write to stop Immich's metadata extraction from overwriting them. `reset` clears the locks. It has been tested with Immich v3.1.0.
 
 The first run downloads geographic data and saves it locally for later runs. Allow for several gigabytes of network traffic; airport data alone required about 13.4 GB of downloads in our measurements. Airport naming is enabled by default and can be disabled. See [download and disk requirements](DATA.md).
 

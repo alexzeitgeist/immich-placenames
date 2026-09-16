@@ -4,7 +4,9 @@ Run immich-placenames as a separate Compose project on the same Docker host as I
 
 Use `docker compose run --rm` for individual commands. Plain `docker compose up` runs one naming pass against the database and exits; use the timer below for hourly scheduling.
 
-[Back up the database](https://docs.immich.app/administration/backup-and-restore/) and disable [Immich's built-in reverse geocoding](https://docs.immich.app/administration/system-settings/#reverse-geocoding-settings) before writing names.
+[Back up the database](https://docs.immich.app/administration/backup-and-restore/) and disable [Immich's built-in reverse geocoding](https://docs.immich.app/administration/system-settings/#reverse-geocoding-settings) before writing names. A run reports the database setting and warns if it is enabled or absent. If you use `IMMICH_CONFIG_FILE`, check the setting in that file; it overrides the value reported here.
+
+Runs lock the names they write to stop Immich's metadata extraction from clearing them. See [`-lock`](../HOWTO.md#preview-and-write).
 
 Build from the project root:
 

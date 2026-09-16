@@ -44,7 +44,7 @@ type command struct {
 var commands = []command{
 	{"fetch", "[-data DIR] [-workers N] [-release R] [-areas=BOOL] [-points] world | airports | CC...", false, (*app).fetch},
 	{"lookup", "[-data DIR] [-profiles FILE] [-workers N] [-json] [-airports=BOOL] [-fallback-distance N] [-points=BOOL] [-point-distance N] LAT LON", false, (*app).lookup},
-	{"run", "[-data DIR] [-profiles FILE] [-workers N] [-dry-run] [-all] [-lock] [-limit N] [-page-size N]", true, (*app).run},
+	{"run", "[-data DIR] [-profiles FILE] [-workers N] [-dry-run] [-all] [-lock=BOOL] [-limit N] [-page-size N]", true, (*app).run},
 	{"status", "[-data DIR] [-profiles FILE]", true, (*app).status},
 	{"reset", "[-dry-run] -all | -ids FILE | -city V | -state V | -country V", true, (*app).reset},
 	{"version", "", false, (*app).version},
@@ -550,6 +550,28 @@ func (a *app) connect(ctx context.Context) (*pgx.Conn, immich.Config, error) {
 	return conn, cfg, nil
 }
 
+func reverseGeocodingSetting(enabled, stored bool) string {
+	setting := "no database setting; Immich default is enabled"
+	if stored {
+		setting = fmt.Sprintf("database setting enabled=%t", enabled)
+	}
+	return setting + "; effective setting unknown: IMMICH_CONFIG_FILE overrides database settings"
+}
+
+func (a *app) warnReverseGeocoding(ctx context.Context, q immich.Querier) {
+	enabled, stored, err := immich.ReverseGeocoding(ctx, q)
+	if err != nil {
+		a.log.Warn("immich reverse geocoding unread", "err", err)
+		return
+	}
+	level := slog.LevelInfo
+	if enabled {
+		level = slog.LevelWarn
+	}
+	a.log.Log(ctx, level, "immich reverse geocoding", "setting", reverseGeocodingSetting(enabled, stored),
+		"effect", "if enabled, immich names assets on import, and a run without -all skips named assets")
+}
+
 // run validates profiles before connecting to the database.
 func (a *app) run(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	a.dataFlag(fs)
@@ -557,7 +579,7 @@ func (a *app) run(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	a.workersFlag(fs)
 	dryRun := fs.Bool("dry-run", false, "print the selection as CSV instead of writing; missing caches are still fetched")
 	all := fs.Bool("all", false, "every asset with coordinates, not only unnamed ones")
-	lock := fs.Bool("lock", false, "also lock the three columns against metadata extraction")
+	lock := fs.Bool("lock", true, "lock the three columns against Immich's metadata extraction")
 	limit := fs.Int("limit", 0, "first N assets in created order across the whole run")
 	pageSize := fs.Int("page-size", defaultPageSize, "selected assets per transaction; 0 uses one transaction for the whole run")
 	if err := a.parse(fs, args); err != nil {
@@ -582,6 +604,7 @@ func (a *app) run(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		return err
 	}
 	defer db.Close(context.Background())
+	a.warnReverseGeocoding(ctx, db)
 	opts := runOptions{All: *all, Lock: *lock, DryRun: *dryRun, Limit: *limit, PageSize: *pageSize}
 	a.log.Info("pass started", "all", opts.All, "limit", opts.Limit, "page_size", opts.PageSize)
 	report, runErr := a.processRun(ctx, databaseStore{db}, p, opts)
@@ -700,8 +723,7 @@ func printCounts(w io.Writer, label string, counts map[string]int) {
 	fmt.Fprintln(w)
 }
 
-// status lists the caches, the profile source with one line per effective
-// profile, then the database and its unprocessed count.
+// status lists caches, profiles, asset counts and the stored reverse geocoding setting.
 func (a *app) status(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	a.dataFlag(fs)
 	a.profilesFlag(fs)
@@ -731,6 +753,17 @@ func (a *app) status(ctx context.Context, fs *flag.FlagSet, args []string) error
 		return err
 	}
 	fmt.Fprintf(a.out, "unprocessed assets %d\n", n)
+	named, locked, err := immich.CountNames(ctx, db)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "named assets %d, locked %d, unlocked %d\n", named, locked, named-locked)
+	enabled, stored, err := immich.ReverseGeocoding(ctx, db)
+	if err != nil {
+		fmt.Fprintf(a.out, "immich reverse geocoding unread: %v\n", err)
+	} else {
+		fmt.Fprintf(a.out, "immich reverse geocoding: %s\n", reverseGeocodingSetting(enabled, stored))
+	}
 	return nil
 }
 

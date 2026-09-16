@@ -51,7 +51,15 @@ The writer updates `asset_exif.city`, `state` and `country` directly in PostgreS
 
 A run selects pages in `(createdAt, id)` order, up to the greatest eligible key at startup. It resolves each page before opening a transaction, keeping downloads and geometry work outside the transaction.
 
-Each update checks that the asset is undeleted and its coordinates are unchanged. City and country must still be null unless `-all` is set. Updates that fail these checks are skipped. `-lock` adds the three name fields to `lockedProperties`.
+Each update checks that the asset is undeleted and its coordinates are unchanged. City and country must still be null unless `-all` is set. Updates that fail these checks are skipped.
+
+`-lock`, on by default, adds `city`, `state` and `country` to `lockedProperties`. Immich's metadata extraction skips columns in that array. Otherwise, it replaces the names with its own when reverse geocoding is enabled and clears them when it is disabled.
+
+Immich's list of lockable fields contains seven other fields. These three work because `lockedProperties` is an unconstrained `varchar[]` and Immich checks array membership. A constraint restricting locks to Immich's list would reject them. Editing an asset's description, date, location or rating triggers a sidecar write, which clears its locks.
+
+`run` reads the reverse geocoding setting from `system_metadata`. It warns if the setting is enabled or absent; Immich's default is enabled. A disabled value is logged at info level. With reverse geocoding enabled, Immich names assets on import and the default selection skips them.
+
+Both `run` and `status` report the stored setting, or Immich's default if none is stored. Neither can determine the running server's setting. `IMMICH_CONFIG_FILE` overrides the database without deleting existing rows, so stored values may be stale.
 
 The default page size is 1000 assets; `-page-size 0` uses one transaction. Earlier commits survive failures or cancellation. No cursor is saved: ordinary reruns select the remaining unnamed assets.
 

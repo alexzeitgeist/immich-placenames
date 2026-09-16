@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"flag"
 	"math"
 	"os"
 	"path/filepath"
@@ -319,4 +321,24 @@ func TestDefaultRunSuppressesResolvedLogs(t *testing.T) {
 	if logs.Len() != 0 {
 		t.Fatalf("default log contains per-asset/page diagnostics: %s", logs.String())
 	}
+}
+
+func TestRunLocksByDefault(t *testing.T) {
+	a := quiet(t.TempDir())
+	var help strings.Builder
+	a.errOut = &help
+	if err := a.call("run", "-h"); !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("run -h = %v", err)
+	}
+	lines := strings.Split(help.String(), "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != "-lock" {
+			continue
+		}
+		if i+1 == len(lines) || !strings.Contains(lines[i+1], "(default true)") {
+			t.Fatalf("-lock is not on by default: %q", strings.Join(lines[i:], "\n"))
+		}
+		return
+	}
+	t.Fatalf("run help lacks -lock: %s", help.String())
 }

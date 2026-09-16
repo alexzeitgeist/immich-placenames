@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,7 +39,8 @@ func runFixture(t *testing.T, n int) *pgx.Conn {
 	_, err = db.Exec(ctx, `SET search_path = pg_temp;
 CREATE TEMP TABLE asset (id uuid PRIMARY KEY, "createdAt" timestamptz NOT NULL, "deletedAt" timestamptz);
 CREATE TEMP TABLE asset_exif ("assetId" uuid PRIMARY KEY, latitude double precision, longitude double precision,
-city varchar CHECK (city <> 'fail'), state varchar, country varchar, "lockedProperties" varchar[]);`)
+city varchar CHECK (city <> 'fail'), state varchar, country varchar, "lockedProperties" varchar[]);
+CREATE TEMP TABLE system_metadata (key varchar PRIMARY KEY, value jsonb NOT NULL);`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,5 +135,53 @@ func TestPageTransactionTimings(t *testing.T) {
 		if r.CommittedPages != wantPages {
 			t.Fatalf("committed %d pages, want %d", r.CommittedPages, wantPages)
 		}
+	}
+}
+
+func TestWarnReverseGeocoding(t *testing.T) {
+	db := runFixture(t, 1)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, value, want, level string
+	}{
+		{"no row", "", "no database setting; Immich default is enabled", "WARN"},
+		{"missing setting", `{"reverseGeocoding": {}}`, "no database setting; Immich default is enabled", "WARN"},
+		{"enabled", `{"reverseGeocoding": {"enabled": true}}`, "database setting enabled=true", "WARN"},
+		// A stored false may be stale when Immich uses IMMICH_CONFIG_FILE.
+		{"disabled", `{"reverseGeocoding": {"enabled": false}}`, "database setting enabled=false", "INFO"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := db.Exec(ctx, `TRUNCATE system_metadata`); err != nil {
+				t.Fatal(err)
+			}
+			if tc.value != "" {
+				if _, err := db.Exec(ctx, `INSERT INTO system_metadata (key, value) VALUES ('system-config', $1::jsonb)`, tc.value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var logs strings.Builder
+			a := quiet(t.TempDir())
+			a.log = slog.New(slog.NewTextHandler(&logs, nil))
+			a.warnReverseGeocoding(ctx, db)
+			for _, want := range []string{"immich reverse geocoding", tc.want, "level=" + tc.level,
+				"effective setting unknown", "IMMICH_CONFIG_FILE overrides database settings",
+				"if enabled", "a run without -all skips named assets"} {
+				if !strings.Contains(logs.String(), want) {
+					t.Errorf("logs %q lack %q", logs.String(), want)
+				}
+			}
+		})
+	}
+
+	// An unreadable setting warns instead of stopping the run.
+	if _, err := db.Exec(ctx, `DROP TABLE system_metadata`); err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	a := quiet(t.TempDir())
+	a.log = slog.New(slog.NewTextHandler(&logs, nil))
+	a.warnReverseGeocoding(ctx, db)
+	if !strings.Contains(logs.String(), "immich reverse geocoding unread") {
+		t.Fatalf("missing table not reported: %s", logs.String())
 	}
 }

@@ -388,6 +388,10 @@ CREATE TABLE asset_exif (
 	state varchar,
 	country varchar,
 	"lockedProperties" varchar[] NOT NULL DEFAULT '{}'::varchar[]
+);
+CREATE TABLE system_metadata (
+	key varchar PRIMARY KEY,
+	value jsonb NOT NULL
 )`); err != nil {
 		t.Fatal(err)
 	}
@@ -849,5 +853,76 @@ func TestConcurrentOverlappingConditionalWrites(t *testing.T) {
 	city, _, country, _ := f.names(t, u1.ID)
 	if !((city == u1.City && country == u1.Country) || (city == u2.City && country == u2.Country)) {
 		t.Fatalf("stored concurrent result=%q, %q", city, country)
+	}
+}
+
+func TestCountNames(t *testing.T) {
+	f := newTestFixture(t)
+	ts := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	deleted := ts
+	f.seed(t, []fixtureAsset{
+		{ID: testID(30), CreatedAt: ts, Lat: 30, Lon: 30},
+		{ID: testID(31), CreatedAt: ts, Lat: 31, Lon: 31, City: stringPtr("City"), Country: stringPtr("Country")},
+		{ID: testID(32), CreatedAt: ts, Lat: 32, Lon: 32, Country: stringPtr("Country"),
+			Locked: []string{"city", "state", "country"}},
+		// Partial locks count as unlocked.
+		{ID: testID(33), CreatedAt: ts, Lat: 33, Lon: 33, City: stringPtr("City"), Locked: []string{"city"}},
+		// Locks without names count as neither.
+		{ID: testID(34), CreatedAt: ts, Lat: 34, Lon: 34, Locked: []string{"city", "state", "country"}},
+		// Exclude trashed assets from both counts.
+		{ID: testID(35), CreatedAt: ts, Lat: 35, Lon: 35, City: stringPtr("City"), DeletedAt: &deleted,
+			Locked: []string{"city", "state", "country"}},
+	})
+	named, locked, err := CountNames(context.Background(), f.conn)
+	if err != nil || named != 3 || locked != 1 {
+		t.Fatalf("CountNames = %d named, %d locked, %v; want 3, 1, nil", named, locked, err)
+	}
+}
+
+func TestReverseGeocoding(t *testing.T) {
+	f := newTestFixture(t)
+	ctx := context.Background()
+
+	enabled, stored, err := ReverseGeocoding(ctx, f.conn)
+	if err != nil || !enabled || stored {
+		t.Fatalf("no row: enabled=%t stored=%t err=%v; want true, false, nil", enabled, stored, err)
+	}
+
+	for _, tc := range []struct {
+		value           string
+		enabled, stored bool
+	}{
+		{`{"reverseGeocoding": {"enabled": true}}`, true, true},
+		{`{"reverseGeocoding": {"enabled": false}}`, false, true},
+		{`{"reverseGeocoding": {}}`, true, false},
+		{`{"ffmpeg": {"accel": "vaapi"}}`, true, false},
+	} {
+		if _, err := f.conn.Exec(ctx, `INSERT INTO system_metadata (key, value) VALUES ('system-config', $1::jsonb)
+ON CONFLICT (key) DO UPDATE SET value = excluded.value`, tc.value); err != nil {
+			t.Fatal(err)
+		}
+		enabled, stored, err := ReverseGeocoding(ctx, f.conn)
+		if err != nil || enabled != tc.enabled || stored != tc.stored {
+			t.Errorf("%s: enabled=%t stored=%t err=%v; want %t, %t, nil", tc.value, enabled, stored, err, tc.enabled, tc.stored)
+		}
+	}
+
+	// Ignore unrelated settings.
+	if _, err := f.conn.Exec(ctx, `DELETE FROM system_metadata WHERE key = 'system-config'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.conn.Exec(ctx, `INSERT INTO system_metadata (key, value) VALUES ('admin-onboarding', '{"isOnboarded": true}'::jsonb)`); err != nil {
+		t.Fatal(err)
+	}
+	if enabled, stored, err := ReverseGeocoding(ctx, f.conn); err != nil || !enabled || stored {
+		t.Fatalf("other keys only: enabled=%t stored=%t err=%v; want true, false, nil", enabled, stored, err)
+	}
+
+	// A missing table is an error.
+	if _, err := f.conn.Exec(ctx, `DROP TABLE system_metadata`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReverseGeocoding(ctx, f.conn); err == nil {
+		t.Fatal("missing system_metadata accepted")
 	}
 }
