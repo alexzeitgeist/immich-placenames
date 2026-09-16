@@ -12,7 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"unicode/utf8"
+	"sync"
 
 	"github.com/alexzeitgeist/immich-placenames/internal/geocode"
 )
@@ -136,9 +136,9 @@ type Profile struct {
 	PointFallback     *bool          `json:"pointFallback,omitempty"`
 	PointDistance     *float64       `json:"pointDistance,omitempty"` // metres; 0 disables
 	CityOverrides     []CityOverride `json:"cityOverrides,omitempty"`
-	// RejectNamePrefixes matches case-insensitively and preserves spaces.
-	// Nil inherits; an empty list clears inherited prefixes.
-	RejectNamePrefixes *[]string `json:"rejectNamePrefixes,omitempty"`
+	// RejectNamePatterns match anywhere in a name, ignoring case by default.
+	// Nil inherits; an empty list clears inherited patterns.
+	RejectNamePatterns *[]RejectPattern `json:"rejectNamePatterns,omitempty"`
 	// CountryFrom is the division subtype whose name replaces the country.
 	// The code from world.geo still selects the cache and profile.
 	CountryFrom string `json:"countryFrom,omitempty"`
@@ -153,6 +153,57 @@ type CityOverride struct {
 	From  string `json:"from"`
 	To    string `json:"to"`
 	State string `json:"state,omitempty"`
+}
+
+// Selection roles. RoleCountry applies only to countryFrom divisions.
+const (
+	RoleCity    = "city"
+	RoleState   = "state"
+	RoleCountry = "country"
+)
+
+// allRoles sets a stable order for normalization and output.
+var allRoles = []string{RoleCity, RoleState, RoleCountry}
+
+// RejectPattern rejects matching names during selection. JSON accepts a string
+// for all roles or an object with explicit roles.
+type RejectPattern struct {
+	Pattern string   `json:"pattern"`
+	Roles   []string `json:"roles"`
+}
+
+func (r *RejectPattern) UnmarshalJSON(b []byte) error {
+	var one string
+	if err := json.Unmarshal(b, &one); err == nil {
+		*r = RejectPattern{Pattern: one, Roles: slices.Clone(allRoles)}
+		return nil
+	}
+	type entry RejectPattern // avoid recursive unmarshalling
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	var o entry
+	if err := dec.Decode(&o); err != nil {
+		return fmt.Errorf("rejectNamePatterns: expected a string or an object with pattern and roles: %w", err)
+	}
+	*r = RejectPattern(o)
+	return nil
+}
+
+func (r RejectPattern) rejects(name, role string) bool {
+	if !slices.Contains(r.Roles, role) {
+		return false
+	}
+	re, err := pattern(r.Pattern)
+	return err == nil && re.MatchString(name)
+}
+
+// String quotes the pattern and appends any role restriction.
+func (r RejectPattern) String() string {
+	s := fmt.Sprintf("%q", r.Pattern)
+	if len(r.Roles) < len(allRoles) {
+		s += "@" + strings.Join(r.Roles, ",")
+	}
+	return s
 }
 
 // Catalog is the profile file shape, bundled and user alike; keys are alpha-2.
@@ -225,10 +276,21 @@ func decode(b []byte, c *Catalog) error {
 				return fmt.Errorf("%s: cityOverrides[%d] has no from", name, i)
 			}
 		}
-		if p.RejectNamePrefixes != nil {
-			for i, prefix := range *p.RejectNamePrefixes {
-				if strings.TrimSpace(prefix) == "" {
-					return fmt.Errorf("%s: rejectNamePrefixes[%d] is empty", name, i)
+		if p.RejectNamePatterns != nil {
+			for i, r := range *p.RejectNamePatterns {
+				if strings.TrimSpace(r.Pattern) == "" {
+					return fmt.Errorf("%s: rejectNamePatterns[%d] is empty", name, i)
+				}
+				if _, err := pattern(r.Pattern); err != nil {
+					return fmt.Errorf("%s: rejectNamePatterns[%d]: %w", name, i, err)
+				}
+				if len(r.Roles) == 0 {
+					return fmt.Errorf("%s: rejectNamePatterns[%d] has no roles", name, i)
+				}
+				for _, role := range r.Roles {
+					if !slices.Contains(allRoles, strings.ToLower(strings.TrimSpace(role))) {
+						return fmt.Errorf("%s: rejectNamePatterns[%d]: role %q is not %s", name, i, role, strings.Join(allRoles, ", "))
+					}
 				}
 			}
 		}
@@ -315,9 +377,9 @@ func (p Profile) apply(o Profile) Profile {
 	if len(o.CityOverrides) > 0 {
 		p.CityOverrides = slices.Clone(o.CityOverrides)
 	}
-	if o.RejectNamePrefixes != nil {
-		list := slices.Clone(*o.RejectNamePrefixes)
-		p.RejectNamePrefixes = &list
+	if o.RejectNamePatterns != nil {
+		list := slices.Clone(*o.RejectNamePatterns)
+		p.RejectNamePatterns = &list
 	}
 	if strings.TrimSpace(o.CountryFrom) != "" {
 		p.CountryFrom = o.CountryFrom
@@ -357,9 +419,9 @@ func (p Profile) normalize() Profile {
 	}
 	p.Language = normalizeLanguages(p.Language)
 	p.CityOverrides = normalizeOverrides(p.CityOverrides)
-	if p.RejectNamePrefixes != nil {
-		list := normalizePrefixes(*p.RejectNamePrefixes)
-		p.RejectNamePrefixes = &list
+	if p.RejectNamePatterns != nil {
+		list := normalizePatterns(*p.RejectNamePatterns)
+		p.RejectNamePatterns = &list
 	}
 	p.CountryFrom = strings.ToLower(strings.TrimSpace(p.CountryFrom))
 	sources := defaultCityFallback
@@ -371,13 +433,30 @@ func (p Profile) normalize() Profile {
 	return p
 }
 
-// normalizePrefixes removes blanks and duplicates, preserving case and spaces.
-func normalizePrefixes(list []string) []string {
-	out := []string{}
-	for _, prefix := range list {
-		if strings.TrimSpace(prefix) != "" && !slices.Contains(out, prefix) {
-			out = append(out, prefix)
+// normalizePatterns preserves spaces, which can be part of a match.
+func normalizePatterns(list []RejectPattern) []RejectPattern {
+	out := []RejectPattern{}
+	for _, r := range list {
+		r.Roles = normalizeRoles(r.Roles)
+		same := func(o RejectPattern) bool { return o.Pattern == r.Pattern && slices.Equal(o.Roles, r.Roles) }
+		if strings.TrimSpace(r.Pattern) != "" && !slices.ContainsFunc(out, same) {
+			out = append(out, r)
 		}
+	}
+	return out
+}
+
+// normalizeRoles orders and deduplicates roles; an empty result means all roles.
+func normalizeRoles(list []string) []string {
+	out := []string{}
+	for _, role := range allRoles {
+		named := func(s string) bool { return strings.EqualFold(strings.TrimSpace(s), role) }
+		if slices.ContainsFunc(list, named) {
+			out = append(out, role)
+		}
+	}
+	if len(out) == 0 {
+		return slices.Clone(allRoles)
 	}
 	return out
 }
@@ -407,32 +486,33 @@ func (p Profile) Override(city, state string) int {
 	return -1
 }
 
-// RejectedBy returns the first configured prefix the name starts with, or "".
-// Matching ignores case.
-func (p Profile) RejectedBy(name string) string {
-	if p.RejectNamePrefixes == nil {
+// RejectedBy returns the first pattern that rejects the name in role, or "".
+func (p Profile) RejectedBy(name, role string) string {
+	if p.RejectNamePatterns == nil {
 		return ""
 	}
-	for _, prefix := range *p.RejectNamePrefixes {
-		if hasPrefixFold(name, prefix) {
-			return prefix
+	for _, r := range *p.RejectNamePatterns {
+		if r.rejects(name, role) {
+			return r.Pattern
 		}
 	}
 	return ""
 }
 
-// hasPrefixFold compares whole runes because case equivalents such as ß and ẞ
-// have different UTF-8 lengths.
-func hasPrefixFold(name, prefix string) bool {
-	end := 0
-	for range prefix {
-		if end == len(name) {
-			return false
-		}
-		_, size := utf8.DecodeRuneInString(name[end:])
-		end += size
+// compiled caches reject patterns because profiles are rebuilt for every asset.
+var compiled sync.Map // pattern -> *regexp.Regexp
+
+// pattern defaults to case-insensitive matching; (?-i) overrides it.
+func pattern(pat string) (*regexp.Regexp, error) {
+	if re, ok := compiled.Load(pat); ok {
+		return re.(*regexp.Regexp), nil
 	}
-	return strings.EqualFold(name[:end], prefix)
+	re, err := regexp.Compile("(?i)" + pat)
+	if err != nil {
+		return nil, err
+	}
+	compiled.Store(pat, re)
+	return re, nil
 }
 
 // normalizeList trims and lowercases entries, removes blanks and duplicates,
@@ -517,8 +597,12 @@ func (p Profile) String() string {
 	if len(p.CityOverrides) > 0 {
 		s += fmt.Sprintf(" cityOverrides=%d", len(p.CityOverrides))
 	}
-	if p.RejectNamePrefixes != nil && len(*p.RejectNamePrefixes) > 0 {
-		s += fmt.Sprintf(" reject=%q", *p.RejectNamePrefixes)
+	if p.RejectNamePatterns != nil && len(*p.RejectNamePatterns) > 0 {
+		patterns := make([]string, 0, len(*p.RejectNamePatterns))
+		for _, r := range *p.RejectNamePatterns {
+			patterns = append(patterns, r.String())
+		}
+		s += " reject=[" + strings.Join(patterns, " ") + "]"
 	}
 	if p.CityFallback != nil && !slices.Equal(*p.CityFallback, defaultCityFallback) {
 		s += " cityFallback=[" + strings.Join(*p.CityFallback, " ") + "]"

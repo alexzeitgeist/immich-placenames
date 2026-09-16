@@ -27,7 +27,9 @@ Matches within the edge tolerance rank the same as exact containment. Candidates
 
 The profile sets the city's area tie-break; states always prefer the smaller area. See [Profiles](HOWTO.md#profiles) for settings and examples.
 
-The resolver skips candidates whose names match `rejectNamePrefixes`. This applies to divisions, division points and airports, but not to the country name from `world.geo`.
+The resolver skips candidates whose names match a regular expression in `rejectNamePatterns`. Matching ignores case by default. This applies to divisions, division points and airports, but not to the country name from `world.geo`.
+
+Patterns apply to all roles by default. An object entry can limit a pattern to `city`, `state` or `country`; the country role applies only to `countryFrom` divisions. Rejection happens during selection, so a candidate rejected for the city can still supply the state.
 
 With `countryFrom`, the resolver uses a containing division for the country name and excludes it from state and city selection. The country code from `world.geo` still selects the divisions cache and profile.
 
@@ -39,7 +41,7 @@ When airport matching is enabled, a containing airport replaces the city. Nearby
 
 The resolver applies `cityOverrides` after airport matching. Entries match the resolved city name case-insensitively, with an optional state filter.
 
-The resolver fills an empty city last, using `cityFallback` in order: state, then country by default. A division subtype, such as `county`, uses the same selection rules as the state: a containing division, then the nearest within `fallbackDistance`. An empty list leaves the city empty. Fallback names bypass city overrides and leave the state and country unchanged.
+The resolver fills an empty city last, using `cityFallback` in order: state, then country by default. A division subtype, such as `county`, uses the same selection rules as the state: a containing division, then the nearest within `fallbackDistance`. Division subtypes use the city role for name rejection. The state and country sources copy the resolved name without checking patterns again. An empty list leaves the city empty. Fallback names bypass city overrides and leave the state and country unchanged.
 
 The resolver selects fallback divisions after name rejection but before assigning country, state or city roles, so a division can supply more than one field. It applies the fallback only after the earlier matching steps and city overrides.
 

@@ -288,8 +288,10 @@ type Candidate struct {
 	Distance    float64  `json:"distance"`         // planar degrees for areas; 0 when contained or a division point
 	Metres      float64  `json:"metres,omitempty"` // great-circle metres, division points only
 	Decision    string   `json:"decision"`
-	row         int
-	lon, lat    float64 // the label point, division points only
+	// Rejected holds the first matching pattern for each role.
+	Rejected map[string]string `json:"rejected,omitempty"`
+	row      int
+	lon, lat float64 // the label point, division points only
 }
 
 // Area is the bounding-box area used to break ranking ties.
@@ -406,14 +408,68 @@ func (p *Provider) gatherPoints(f *cache.File, pt geocode.Point, chain Languages
 	return out, nil
 }
 
-// rejectNames marks rejected candidates before selection, which skips candidates
-// with a decision. lookup prints the rejection reason.
+// rejectNames records rejections by role without setting Decision.
 func rejectNames(cands []Candidate, p Profile) {
 	for i := range cands {
-		if prefix := p.RejectedBy(cands[i].Name); prefix != "" {
-			cands[i].Decision = fmt.Sprintf("name rejected, prefix %q", prefix)
+		for _, role := range allRoles {
+			if pat := p.RejectedBy(cands[i].Name, role); pat != "" {
+				if cands[i].Rejected == nil {
+					cands[i].Rejected = map[string]string{}
+				}
+				cands[i].Rejected[role] = pat
+			}
 		}
 	}
+}
+
+// Airports and division points can fill only the city.
+var fillsCity = []string{RoleCity}
+
+func rejectedForAll(c Candidate, fills []string) bool {
+	for _, role := range fills {
+		if c.Rejected[role] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// noteRejections adds rejection reasons after selection and city fallback.
+func noteRejections(cands []Candidate) {
+	for i := range cands {
+		c := &cands[i]
+		switch note := rejectionNote(c.Rejected); {
+		case note == "":
+		case c.Decision == "":
+			c.Decision = note
+		default:
+			c.Decision += "; " + note
+		}
+	}
+}
+
+// rejectionNote groups roles by pattern, omitting the role list for all-role matches.
+func rejectionNote(rejected map[string]string) string {
+	roles, order := map[string][]string{}, []string{}
+	for _, role := range allRoles {
+		pat, ok := rejected[role]
+		if !ok {
+			continue
+		}
+		if _, seen := roles[pat]; !seen {
+			order = append(order, pat)
+		}
+		roles[pat] = append(roles[pat], role)
+	}
+	notes := make([]string, 0, len(order))
+	for _, pat := range order {
+		if len(roles[pat]) == len(allRoles) {
+			notes = append(notes, fmt.Sprintf("name rejected, pattern %q", pat))
+			continue
+		}
+		notes = append(notes, fmt.Sprintf("name rejected for %s, pattern %q", strings.Join(roles[pat], ","), pat))
+	}
+	return strings.Join(notes, "; ")
 }
 
 func adminOrder(l int32) int64 {
@@ -450,7 +506,7 @@ func selectCountryDivision(cands []Candidate, subtype string) int {
 	if subtype == "" {
 		return -1
 	}
-	i := selectName(cands, []string{subtype}, false)
+	i := selectName(cands, []string{subtype}, false, RoleCountry)
 	if i < 0 || cands[i].Name == "" {
 		return -1
 	}
@@ -488,10 +544,10 @@ func nameBefore(a, b Candidate, list []string, largest bool) bool {
 	return a.ID < b.ID
 }
 
-func selectName(cands []Candidate, list []string, largest bool) int {
+func selectName(cands []Candidate, list []string, largest bool, role string) int {
 	best := -1
 	for i, c := range cands {
-		if c.Decision != "" || !c.Contains || subtypeIndex(list, c.Subtype) < 0 {
+		if c.Decision != "" || c.Rejected[role] != "" || !c.Contains || subtypeIndex(list, c.Subtype) < 0 {
 			continue
 		}
 		if best < 0 || nameBefore(c, cands[best], list, largest) {
@@ -514,10 +570,10 @@ func nearestBefore(a, b Candidate, list []string) bool {
 
 // selectNearest is the fallback when nothing selectable contains the point:
 // the nearest candidate of a listed subtype within bound.
-func selectNearest(cands []Candidate, list []string, bound float64) int {
+func selectNearest(cands []Candidate, list []string, bound float64, role string) int {
 	best := -1
 	for i, c := range cands {
-		if c.Decision != "" || c.Contains || c.Distance > bound || subtypeIndex(list, c.Subtype) < 0 {
+		if c.Decision != "" || c.Rejected[role] != "" || c.Contains || c.Distance > bound || subtypeIndex(list, c.Subtype) < 0 {
 			continue
 		}
 		if best < 0 || nearestBefore(c, cands[best], list) {
@@ -543,7 +599,7 @@ func pointBefore(a, b Candidate, list []string) bool {
 func selectPoint(cands []Candidate, list []string, metres float64) int {
 	best := -1
 	for i, c := range cands {
-		if c.Decision != "" || c.Metres > metres || subtypeIndex(list, c.Subtype) < 0 {
+		if c.Decision != "" || c.Rejected[RoleCity] != "" || c.Metres > metres || subtypeIndex(list, c.Subtype) < 0 {
 			continue
 		}
 		if best < 0 || pointBefore(c, cands[best], list) {
@@ -604,7 +660,7 @@ func airportBefore(a, b Candidate, pt geocode.Point) bool {
 func selectAirport(cands []Candidate, pt geocode.Point) int {
 	best := -1
 	for i, c := range cands {
-		if c.Decision != "" || !c.Contains {
+		if c.Decision != "" || c.Rejected[RoleCity] != "" || !c.Contains {
 			continue
 		}
 		if best < 0 || airportBefore(c, cands[best], pt) {
@@ -679,11 +735,14 @@ func role(r string, c Candidate) string {
 	return r + ", nearest"
 }
 
-func decide(cands []Candidate, winner int, role string, lists ...[]string) {
+// decide labels undecided candidates, leaving rejections for noteRejections.
+// fills lists the possible selection roles.
+func decide(cands []Candidate, winner int, role string, fills []string, lists ...[]string) {
 	for i := range cands {
 		c := &cands[i]
 		switch {
 		case c.Decision != "":
+		case rejectedForAll(*c, fills):
 		case i == winner:
 			c.Decision = role
 		case !c.Contains:
@@ -702,6 +761,7 @@ func decidePoints(cands []Candidate, winner int, list []string, metres float64) 
 		c := &cands[i]
 		switch {
 		case c.Decision != "":
+		case rejectedForAll(*c, fillsCity):
 		case i == winner:
 			c.Decision = "city, point"
 		case c.Metres > metres:
@@ -747,7 +807,7 @@ func (p *Provider) points(ctx context.Context, e *Explanation, pt geocode.Point,
 			return -1, err
 		}
 		for i := range e.Points {
-			if e.Points[i].Decision == "" && e.Points[i].Metres <= metres && !g.Contains(e.Points[i].lon, e.Points[i].lat) {
+			if e.Points[i].Decision == "" && e.Points[i].Rejected[RoleCity] == "" && e.Points[i].Metres <= metres && !g.Contains(e.Points[i].lon, e.Points[i].lat) {
 				e.Points[i].Decision = "outside " + e.Divisions[gi].Name
 			}
 		}
@@ -777,7 +837,7 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 		return nil, err
 	}
 	ci := rankCountry(e.Countries)
-	decide(e.Countries, ci, "country")
+	decide(e.Countries, ci, "country", allRoles)
 	if ci < 0 || e.Countries[ci].Country == "" {
 		return e, nil
 	}
@@ -804,9 +864,9 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 			continue
 		}
 		list := []string{s}
-		i := selectName(e.Divisions, list, false)
+		i := selectName(e.Divisions, list, false, RoleCity)
 		if i < 0 {
-			i = selectNearest(e.Divisions, list, bound)
+			i = selectNearest(e.Divisions, list, bound, RoleCity)
 		}
 		if i >= 0 && e.Divisions[i].Name != "" {
 			fallbackDiv[s], fallbackName[s] = i, e.Divisions[i].Name
@@ -816,13 +876,13 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 		e.CountryReplaced, countryName, countryLang = countryName, e.Divisions[i].Name, e.Divisions[i].Language
 		e.Divisions[i].Decision = "country"
 	}
-	si := selectName(e.Divisions, e.Profile.StateSubtypes, false)
+	si := selectName(e.Divisions, e.Profile.StateSubtypes, false, RoleState)
 	if si < 0 {
-		si = selectNearest(e.Divisions, e.Profile.StateSubtypes, bound)
+		si = selectNearest(e.Divisions, e.Profile.StateSubtypes, bound, RoleState)
 	}
-	cityI := selectName(e.Divisions, e.Profile.PreferredSubtypes, e.Profile.TieBreakMode == TieBreakLargest)
+	cityI := selectName(e.Divisions, e.Profile.PreferredSubtypes, e.Profile.TieBreakMode == TieBreakLargest, RoleCity)
 	if cityI < 0 {
-		cityI = selectNearest(e.Divisions, e.Profile.PreferredSubtypes, bound)
+		cityI = selectNearest(e.Divisions, e.Profile.PreferredSubtypes, bound, RoleCity)
 	}
 	if si >= 0 {
 		e.State = e.Divisions[si].Name
@@ -836,7 +896,7 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 			e.Divisions[cityI].Decision = role("city", e.Divisions[cityI])
 		}
 	}
-	decide(e.Divisions, -1, "", e.Profile.StateSubtypes, e.Profile.PreferredSubtypes)
+	decide(e.Divisions, -1, "", allRoles, e.Profile.StateSubtypes, e.Profile.PreferredSubtypes)
 	pointI := -1
 	if cityI < 0 && *e.Profile.PointFallback && *e.Profile.PointDistance > 0 {
 		if pointI, err = p.points(ctx, e, pt, d, exact); err != nil {
@@ -867,7 +927,7 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 				e.Points[pointI].Decision += ", replaced by airport"
 			}
 		}
-		decide(e.Airports, ai, "airport")
+		decide(e.Airports, ai, "airport", fillsCity)
 	}
 	city, cityLang := e.City, ""
 	switch {
@@ -909,6 +969,9 @@ func (p *Provider) compute(ctx context.Context, pt geocode.Point, exact bool) (*
 			p.served[e.Divisions[i].Language]++
 		}
 	}
+	noteRejections(e.Divisions)
+	noteRejections(e.Points)
+	noteRejections(e.Airports)
 	return e, nil
 }
 

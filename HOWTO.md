@@ -111,7 +111,7 @@ Start with `lookup`. Check whether the boundary you want appears and contains th
 
 The tool loads `profiles.json` from the data directory, using bundled settings if the file is absent. An explicit `-profiles FILE` must exist.
 
-Fields merge in this order: bundled default → bundled country → user default → user country. Your global defaults can override the bundled DE/FI/FR/US rules. Missing fields, nulls, empty lists and blank strings inherit; `false` and zero override. For `rejectNamePrefixes` and `cityFallback`, an empty list clears the inherited value instead.
+Fields merge in this order: bundled default → bundled country → user default → user country. Your global defaults can override the bundled DE/FI/FR/US rules. Missing fields, nulls, empty lists and blank strings inherit; `false` and zero override. For `rejectNamePatterns` and `cityFallback`, an empty list clears the inherited value instead.
 
 For example, to prefer municipality boundaries in Croatia:
 
@@ -139,13 +139,13 @@ This prefers `county`, then the largest bounding box when other city rankings ti
 | `pointFallback` | `false` | Use nearby division points when no area supplies a city name |
 | `pointDistance` | `500` metres | Bound for division-point matching; zero disables it |
 | `cityOverrides` | none | Replace resolved city names |
-| `rejectNamePrefixes` | none | Skip names starting with a listed prefix |
+| `rejectNamePatterns` | none | Skip matching names, optionally limited to selected roles |
 | `countryFrom` | none | Division subtype whose name replaces the country |
 | `cityFallback` | `state, country` | Sources for an empty city: state, country or a division subtype |
 
 Both subtype lists accept `country`, `dependency`, `region`, `macroregion`, `county`, `macrocounty`, `localadmin`, `locality`, `borough`, `macrohood`, `neighborhood` and `microhood`.
 
-`countryFrom` accepts the same subtype names, and `cityFallback` accepts them alongside `state` and `country`. Country keys use two-letter codes such as `HR`. Unknown fields, invalid country keys, unknown subtypes, tie-break modes or fallback sources, negative distances, city overrides with an empty `from`, empty reject prefixes and malformed language codes fail when the file loads.
+`countryFrom` accepts the same subtype names, and `cityFallback` accepts them alongside `state` and `country`. Country keys use two-letter codes such as `HR`. Unknown fields, invalid country keys, unknown subtypes, tie-break modes or fallback sources, negative distances, city overrides with an empty `from`, empty or invalid reject patterns, object entries with missing, empty or unknown roles, and malformed language codes fail when the file loads.
 
 Fallback distance is measured in degrees, not metres. Candidates' bounding boxes must still contain the point, and subtype preference ranks before distance. `pointDistance` is measured in metres. See [boundary selection](DESIGN.md#boundary-selection).
 
@@ -224,7 +224,7 @@ Where the resolver picks a name you do not want, rewrite it:
 
 `from` matches the resolved city name, including airport names. Matching ignores case. The first matching entry wins. Add `state` to distinguish places with the same name. An empty `to` clears the city before the [city fallback](#when-nothing-names-the-city) runs.
 
-If `cityFallback` includes the subtype that supplied the cleared name, it can restore that name. Remove the subtype from the chain, or use [`rejectNamePrefixes`](#skipping-names) to reject the name during selection, including fallback selection.
+If `cityFallback` includes the subtype that supplied the cleared name, it can restore that name. Remove the subtype from the chain, or use [`rejectNamePatterns`](#skipping-names) to reject the name during selection, including fallback selection.
 
 Overrides apply only to resolved city names. They leave state and country fields unchanged, and do not apply to a name the city fallback copied. `lookup` reports each rewrite on an `override:` line, and `status` counts the entries in each profile.
 
@@ -233,14 +233,20 @@ Overrides apply only to resolved city names. They leave state and country fields
 The German profile skips district and administrative association names so you get municipality names where available:
 
 ```json
-"rejectNamePrefixes": ["Landkreis ", "Kreis ", "GVV ", "VVG ", "Samtgemeinde ", "Verwaltungsgemeinschaft "]
+"rejectNamePatterns": [
+  "kreis($|\\s)",
+  "(region|district)($|\\s)",
+  "^(GVV|VVG|Samtgemeinde|Verwaltungsgemeinschaft|Regionalverband) "
+]
 ```
 
-The first two prefixes exclude districts; the other four exclude administrative associations. Without the association prefixes, you can get `GVV Jestetten` instead of `Jestetten`, or `Samtgemeinde Bersenbrück` instead of `Bersenbrück`. Overture classifies both associations and municipalities as localities, and the German profile prefers the larger boundary when other rankings tie.
+The first two patterns match district names such as `Landkreis Oberallgäu`, `Kreis Steinfurt`, `Wetteraukreis`, `Rhein-Kreis Neuss`, `Hannover Region` and `Städteregion Aachen`. They also match `Lake Constance district`, Overture's English name for the Bodenseekreis. `Kreischa` stays because a letter follows `kreis`.
 
-Cities that are counties of their own, such as Stuttgart, keep their names because none of these prefixes match.
+The third pattern excludes administrative associations. Without it you can get `GVV Jestetten` instead of `Jestetten`, or `Samtgemeinde Bersenbrück` instead of `Bersenbrück`. Overture classifies both associations and municipalities as localities, and the German profile prefers the larger boundary when other rankings tie.
 
-These prefixes were checked against Overture release `2026-08-19.0`; they may not cover every association name. The list excludes `Amt ` because municipalities such as Amt Neuhaus use it.
+Cities that are counties of their own, such as Stuttgart, keep their names because no pattern matches them.
+
+These patterns were checked against Overture release `2026-08-19.0`. They do not match district names such as `Bautzen` or `Uckermark`; reject those individually if they appear. The list omits `Amt ` because municipalities such as Amt Neuhaus use it.
 
 To name German photos after their district again, clear the list:
 
@@ -248,7 +254,7 @@ To name German photos after their district again, clear the list:
 {
   "countryOverrides": {
     "DE": {
-      "rejectNamePrefixes": []
+      "rejectNamePatterns": []
     }
   }
 }
@@ -263,11 +269,43 @@ For village names within a municipality, set `"tieBreakMode": "smallest-area"` i
 
 Both rows use English names. With `"language": "de"`, `Constance` becomes `Konstanz`; `Litzelstetten` stays the same.
 
-No other country rejects prefixes by default. If you set prefixes in `defaultProfile`, use `"rejectNamePrefixes": []` in a country override to clear the inherited list.
+No other country rejects names by default. If you set patterns in `defaultProfile`, use `"rejectNamePatterns": []` in a country override to clear the inherited list.
 
-Matching ignores case. `ß` matches `ẞ`, but not `SS`. Write prefixes in your chosen name language. The trailing space in `Kreis ` rejects `Kreis Steinfurt` but keeps the municipality `Kreischa`.
+Patterns are [regular expressions](https://pkg.go.dev/regexp/syntax) and match anywhere in the name. Use `^` to match at the start or `$` at the end. Matching ignores case by default: `ß` matches `ẞ`, but not `SS`. Start a pattern with `(?-i)` to make it case-sensitive. Write patterns in your chosen name language. Invalid expressions prevent the profile file from loading.
 
-Prefixes apply to city, state and airport names, including nearby place names used as fallbacks. They also apply to country names chosen with `countryFrom`, but leave the default country name unchanged. `lookup` marks rejected candidates with `name rejected, prefix "Landkreis "`.
+A plain pattern skips matching city, state and airport names, nearby place labels, and country names chosen with `countryFrom`. It leaves the default country name unchanged. `lookup` marks rejected candidates with `name rejected, pattern "kreis($|\\s)"`.
+
+### Restricting a pattern to a role
+
+To skip a name only for certain fields, list the roles in an object: `city`, `state` or `country`. For example, to keep Croatian county names in the state field but skip them when choosing a city:
+
+```json
+{
+  "countryOverrides": {
+    "HR": {
+      "language": "de",
+      "rejectNamePatterns": [
+        { "pattern": "^Gespanschaft ", "roles": ["city"] }
+      ],
+      "cityFallback": []
+    }
+  }
+}
+```
+
+This example uses German names so `^Gespanschaft ` matches the county name. With `"roles": ["city"]`, you keep `Gespanschaft Dubrovnik-Neretva` as the state. A plain string would reject it for both city and state selection.
+
+Role-scoped patterns apply during name selection. A `state` or `country` city fallback copies the resolved name without checking patterns again. The default `cityFallback` would copy the state back into the city, so the example sets `"cityFallback": []` to leave the city empty. Use `["country"]` to fill the city with `Kroatien` instead.
+
+The `country` role applies only to names chosen with [`countryFrom`](#naming-the-country-after-a-region). The `city` role applies to airports, nearby place labels and division subtypes listed in `cityFallback`.
+
+Every object entry needs a non-empty `roles` list. Use a string to reject a name in all roles; you can mix strings and objects in one list. Both forms support `(?-i)`. Run `lookup` to check which names were used or rejected:
+
+```text
+IN   county  lvl=2  T  area=2394.48  Gespanschaft Dubrovnik-Neretva (de)  state; name rejected for city, pattern "^Gespanschaft "
+```
+
+`status` marks a scoped entry with its roles: `reject=["kreis($|\\s)" "^Gespanschaft "@city]`.
 
 ### Naming the country after a region
 

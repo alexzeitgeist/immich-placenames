@@ -303,7 +303,8 @@ func TestCityFallbackSkipsRejectedNames(t *testing.T) {
 		division{"county", "Landkreis Oberallgäu", "county", 0, 0.5})
 	for _, tc := range []struct{ name, profile, city, from string }{
 		{"county fills", `{"cityFallback": ["county", "state"]}`, "Landkreis Oberallgäu", "county"},
-		{"rejected county", `{"cityFallback": ["county", "state"], "rejectNamePrefixes": ["Landkreis "]}`, "Bavaria", geocode.SourceState},
+		{"rejected county", `{"cityFallback": ["county", "state"], "rejectNamePatterns": ["^Landkreis "]}`, "Bavaria", geocode.SourceState},
+		{"rejected for the city role", `{"cityFallback": ["county", "state"], "rejectNamePatterns": [{"pattern": "^Landkreis ", "roles": ["city"]}]}`, "Bavaria", geocode.SourceState},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			profiles, _ := writeProfileCatalog(t, t.TempDir(),

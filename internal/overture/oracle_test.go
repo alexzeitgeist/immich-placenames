@@ -264,9 +264,9 @@ func TestOracleGermanDistrictNames(t *testing.T) {
 	}{
 		{"bundled", Profile{},
 			[]string{"Jestetten", "Constance", "Bersenbrück", "Stuttgart"}},
-		{"prefixes cleared", Profile{RejectNamePrefixes: strs()},
+		{"patterns cleared", Profile{RejectNamePatterns: pats()},
 			[]string{"Landkreis Waldshut", "Landkreis Konstanz", "Landkreis Osnabrück", "Stuttgart"}},
-		{"districts only", Profile{RejectNamePrefixes: strs("Landkreis ", "Kreis ")},
+		{"districts only", Profile{RejectNamePatterns: pats("^landkreis ", "^kreis ")},
 			[]string{"GVV Jestetten", "VVG der Stadt Konstanz", "Samtgemeinde Bersenbrück", "Stuttgart"}},
 		{"smallest area", Profile{TieBreakMode: TieBreakSmallest},
 			[]string{"Jestetten", "Litzelstetten", "Bersenbrück", "Stuttgart"}},

@@ -60,21 +60,21 @@ func TestCountryPrefersTerritorialThenSmallerArea(t *testing.T) {
 
 func TestStatePrefersRegionOverCounty(t *testing.T) {
 	cs := []Candidate{cand("county", "Zurich District", 0.05), cand("region", "Canton of Zurich", 0.20)}
-	if got := pick(t, cs, selectName(cs, defaultStateSubtypes, false)); got != "Canton of Zurich" {
+	if got := pick(t, cs, selectName(cs, defaultStateSubtypes, false, RoleState)); got != "Canton of Zurich" {
 		t.Errorf("got %s", got)
 	}
 }
 
 func TestStatePrefersLowerAdminLevelWithinSameSubtype(t *testing.T) {
 	cs := []Candidate{cand("region", "Lower Priority Region", 0.01, level(2)), cand("region", "Preferred Region", 0.20, level(1))}
-	if got := pick(t, cs, selectName(cs, defaultStateSubtypes, false)); got != "Preferred Region" {
+	if got := pick(t, cs, selectName(cs, defaultStateSubtypes, false, RoleState)); got != "Preferred Region" {
 		t.Errorf("got %s", got)
 	}
 }
 
 func TestMissingAdminLevelSortsLast(t *testing.T) {
 	cs := []Candidate{cand("region", "Unknown Level", 0.01), cand("region", "Level 2", 0.20, level(2))}
-	if got := pick(t, cs, selectName(cs, defaultStateSubtypes, false)); got != "Level 2" {
+	if got := pick(t, cs, selectName(cs, defaultStateSubtypes, false, RoleState)); got != "Level 2" {
 		t.Errorf("got %s", got)
 	}
 }
@@ -82,56 +82,56 @@ func TestMissingAdminLevelSortsLast(t *testing.T) {
 func TestCityPrefersLocalityOverNeighborhood(t *testing.T) {
 	cs := []Candidate{cand("neighborhood", "Seefeld", 0.01), cand("locality", "Zurich", 0.20)}
 	p := (&Profiles{}).Profile("CH")
-	if got := pick(t, cs, selectName(cs, p.PreferredSubtypes, false)); got != "Zurich" {
+	if got := pick(t, cs, selectName(cs, p.PreferredSubtypes, false, RoleCity)); got != "Zurich" {
 		t.Errorf("got %s", got)
 	}
 }
 
 func TestCityRequiresGeometryContainment(t *testing.T) {
 	cs := []Candidate{cand("locality", "Zurich", 0.20, outside), cand("locality", "Zurich-Flughafen", 0.05)}
-	if got := pick(t, cs, selectName(cs, defaultSubtypes, false)); got != "Zurich-Flughafen" {
+	if got := pick(t, cs, selectName(cs, defaultSubtypes, false, RoleCity)); got != "Zurich-Flughafen" {
 		t.Errorf("got %s", got)
 	}
 	cs = []Candidate{cand("locality", "Zurich", 0.20, outside)}
-	if selectName(cs, defaultSubtypes, false) != -1 {
+	if selectName(cs, defaultSubtypes, false, RoleCity) != -1 {
 		t.Error("bbox-only locality selected without geometry containment")
 	}
 }
 
 func TestCityPrefersTerritorialWithinSameSubtype(t *testing.T) {
 	cs := []Candidate{cand("locality", "Water Label", 0.01), cand("locality", "Real Administrative Area", 0.02, territorial)}
-	if got := pick(t, cs, selectName(cs, defaultSubtypes, false)); got != "Real Administrative Area" {
+	if got := pick(t, cs, selectName(cs, defaultSubtypes, false, RoleCity)); got != "Real Administrative Area" {
 		t.Errorf("got %s", got)
 	}
 }
 
 func TestCityUsesConfiguredSubtypeOrder(t *testing.T) {
 	cs := []Candidate{cand("locality", "Chassieu", 0.00217), cand("localadmin", "Lyon", 0.39414)}
-	if got := pick(t, cs, selectName(cs, []string{"localadmin", "locality"}, true)); got != "Lyon" {
+	if got := pick(t, cs, selectName(cs, []string{"localadmin", "locality"}, true, RoleCity)); got != "Lyon" {
 		t.Errorf("got %s", got)
 	}
 }
 
 func TestCityUsesLargestAreaTieBreak(t *testing.T) {
 	cs := []Candidate{cand("locality", "Armfelt", 0.000239), cand("locality", "Salo", 0.60364)}
-	if got := pick(t, cs, selectName(cs, []string{"locality", "localadmin"}, true)); got != "Salo" {
+	if got := pick(t, cs, selectName(cs, []string{"locality", "localadmin"}, true, RoleCity)); got != "Salo" {
 		t.Errorf("got %s", got)
 	}
-	if got := pick(t, cs, selectName(cs, []string{"locality", "localadmin"}, false)); got != "Armfelt" {
+	if got := pick(t, cs, selectName(cs, []string{"locality", "localadmin"}, false, RoleCity)); got != "Armfelt" {
 		t.Errorf("smallest: got %s", got)
 	}
 }
 
 func TestCityUsesConfiguredCountyPreference(t *testing.T) {
 	cs := []Candidate{cand("locality", "Altstadt-Lehel", 0.000856), cand("county", "Munich", 0.067538, level(2))}
-	if got := pick(t, cs, selectName(cs, []string{"county", "locality", "localadmin"}, true)); got != "Munich" {
+	if got := pick(t, cs, selectName(cs, []string{"county", "locality", "localadmin"}, true, RoleCity)); got != "Munich" {
 		t.Errorf("got %s", got)
 	}
 }
 
 func TestSubtypeSpecificityBeforeArea(t *testing.T) {
 	cs := []Candidate{cand("neighborhood", "hood", 0.20), cand("locality", "town", 0.05)}
-	if got := pick(t, cs, selectName(cs, []string{"neighborhood", "locality"}, false)); got != "hood" {
+	if got := pick(t, cs, selectName(cs, []string{"neighborhood", "locality"}, false, RoleCity)); got != "hood" {
 		t.Errorf("got %s", got)
 	}
 }
@@ -165,10 +165,23 @@ func TestAirportRanking(t *testing.T) {
 func f64(v float64) *float64 { return &v }
 func boolp(v bool) *bool     { return &v }
 
-// strs is a reject-prefix list; strs() is the empty list that clears one.
+// strs() clears an inherited list with a non-nil empty one.
 func strs(v ...string) *[]string {
 	list := append([]string{}, v...)
 	return &list
+}
+
+// pats applies patterns to all roles; pats() clears the inherited list.
+func pats(v ...string) *[]RejectPattern {
+	list := []RejectPattern{}
+	for _, pattern := range v {
+		list = append(list, RejectPattern{Pattern: pattern, Roles: allRoles})
+	}
+	return &list
+}
+
+func scoped(pattern string, roles ...string) *[]RejectPattern {
+	return &[]RejectPattern{{Pattern: pattern, Roles: roles}}
 }
 
 func TestProfileMerge(t *testing.T) {
@@ -179,7 +192,7 @@ func TestProfileMerge(t *testing.T) {
 	  "countryOverrides": {
 	    "hr": {"preferredSubtypes": ["County", "locality", " county "], "tieBreakMode": "largest-area", "airports": false, "stateSubtypes": ["County", " region "]},
 	    "IN": {"preferredSubtypes": ["locality", "county"], "tieBreakMode": "", "fallbackDistance": 0, "language": " EN "},
-	    "DE": {"preferredSubtypes": [], "tieBreakMode": "smallest-area", "rejectNamePrefixes": []},
+	    "DE": {"preferredSubtypes": [], "tieBreakMode": "smallest-area", "rejectNamePatterns": []},
 	    "FR": {"language": ["DE", "en", " "]},
 	    "GB": {"countryFrom": " Region "},
 	    "XX": {"preferredSubtypes": ["  "], "tieBreakMode": " Largest-Area ", "stateSubtypes": ["  "]}
@@ -193,7 +206,7 @@ func TestProfileMerge(t *testing.T) {
 		"CH": {defaultSubtypes, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, "", both},
 		"HR": {[]string{"county", "locality"}, TieBreakLargest, f64(0.005), boolp(false), Languages{"primary", "en"}, []string{"county", "region"}, boolp(false), f64(500), nil, nil, "", both},
 		"IN": {[]string{"locality", "county"}, TieBreakSmallest, f64(0), boolp(true), Languages{"en", "primary"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, "", both},
-		"DE": {[]string{"county", "locality", "localadmin", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, strs(), "", both},
+		"DE": {[]string{"county", "locality", "localadmin", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, pats(), "", both},
 		"FR": {[]string{"localadmin", "locality", "county", "borough", "macrohood", "neighborhood", "microhood"}, TieBreakLargest, f64(0.005), boolp(true), Languages{"de", "en", "primary"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, "", both},
 		"GB": {defaultSubtypes, TieBreakSmallest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, "region", both},
 		"XX": {defaultSubtypes, TieBreakLargest, f64(0.005), boolp(true), Languages{"primary", "en"}, defaultStateSubtypes, boolp(false), f64(500), nil, nil, "", both},
@@ -204,26 +217,31 @@ func TestProfileMerge(t *testing.T) {
 		}
 	}
 	bundled, _ := LoadProfiles("")
-	germanPrefixes := []string{"Landkreis ", "Kreis ", "GVV ", "VVG ", "Samtgemeinde ", "Verwaltungsgemeinschaft "}
+	germanPatterns := *pats(`kreis($|\s)`, `(region|district)($|\s)`, "^(GVV|VVG|Samtgemeinde|Verwaltungsgemeinschaft|Regionalverband) ")
 	if got := bundled.Profile("de"); got.TieBreakMode != TieBreakLargest || *got.FallbackDistance != DefaultFallbackDistance || !*got.Airports ||
 		!reflect.DeepEqual(got.Language, Languages{"en", "primary"}) ||
-		got.RejectNamePrefixes == nil || !reflect.DeepEqual(*got.RejectNamePrefixes, germanPrefixes) {
+		got.RejectNamePatterns == nil || !reflect.DeepEqual(*got.RejectNamePatterns, germanPatterns) {
 		t.Errorf("bundled DE: %v", got)
 	}
 	for name, body := range map[string]string{
-		"unknown key":  `{"defaultProfile": {"fallbackDistanc": 1}}`,
-		"tie-break":    `{"countryOverrides": {"HR": {"tieBreakMode": "largest"}}}`,
-		"negative":     `{"countryOverrides": {"HR": {"fallbackDistance": -1}}}`,
-		"subtype":      `{"defaultProfile": {"preferredSubtypes": ["localiity"]}}`,
-		"state":        `{"countryOverrides": {"HR": {"stateSubtypes": ["regoin"]}}}`,
-		"country from": `{"countryOverrides": {"HR": {"countryFrom": "regoin"}}}`,
-		"blank prefix": `{"defaultProfile": {"rejectNamePrefixes": ["Landkreis ", " "]}}`,
-		"city source":  `{"defaultProfile": {"cityFallback": ["city"]}}`,
-		"key":          `{"countryOverrides": {"HRV": {"airports": false}}}`,
-		"language":     `{"defaultProfile": {"language": "d e"}}`,
-		"languages":    `{"defaultProfile": {"language": ["de", 1]}}`,
-		"trailing":     `{"defaultProfile": {}} }`,
-		"two catalogs": `{"defaultProfile": {}} {"countryOverrides": {"HR": {"airports": false}}}`,
+		"unknown key":   `{"defaultProfile": {"fallbackDistanc": 1}}`,
+		"tie-break":     `{"countryOverrides": {"HR": {"tieBreakMode": "largest"}}}`,
+		"negative":      `{"countryOverrides": {"HR": {"fallbackDistance": -1}}}`,
+		"subtype":       `{"defaultProfile": {"preferredSubtypes": ["localiity"]}}`,
+		"state":         `{"countryOverrides": {"HR": {"stateSubtypes": ["regoin"]}}}`,
+		"country from":  `{"countryOverrides": {"HR": {"countryFrom": "regoin"}}}`,
+		"blank pattern": `{"defaultProfile": {"rejectNamePatterns": ["kreis", " "]}}`,
+		"bad pattern":   `{"defaultProfile": {"rejectNamePatterns": ["kreis("]}}`,
+		"pattern shape": `{"defaultProfile": {"rejectNamePatterns": [{"patern": "kreis", "roles": ["city"]}]}}`,
+		"missing roles": `{"defaultProfile": {"rejectNamePatterns": [{"pattern": "kreis"}]}}`,
+		"empty roles":   `{"defaultProfile": {"rejectNamePatterns": [{"pattern": "kreis", "roles": []}]}}`,
+		"unknown role":  `{"defaultProfile": {"rejectNamePatterns": [{"pattern": "kreis", "roles": ["town"]}]}}`,
+		"city source":   `{"defaultProfile": {"cityFallback": ["city"]}}`,
+		"key":           `{"countryOverrides": {"HRV": {"airports": false}}}`,
+		"language":      `{"defaultProfile": {"language": "d e"}}`,
+		"languages":     `{"defaultProfile": {"language": ["de", 1]}}`,
+		"trailing":      `{"defaultProfile": {}} }`,
+		"two catalogs":  `{"defaultProfile": {}} {"countryOverrides": {"HR": {"airports": false}}}`,
 	} {
 		os.WriteFile(user, []byte(body), 0o644)
 		if _, err := LoadProfiles(user); err == nil {
@@ -383,17 +401,17 @@ func dist(d float64) func(*Candidate) {
 
 func TestNearestFallbackWithinBound(t *testing.T) {
 	cs := []Candidate{cand("locality", "Cavtat", 0.01, dist(0.00026)), cand("county", "Konavle", 0.5, dist(0.00026)), cand("locality", "Far", 0.01, dist(0.02))}
-	if got := pick(t, cs, selectNearest(cs, []string{"county", "locality"}, DefaultFallbackDistance)); got != "Konavle" {
+	if got := pick(t, cs, selectNearest(cs, []string{"county", "locality"}, DefaultFallbackDistance, RoleCity)); got != "Konavle" {
 		t.Errorf("subtype order before distance, got %s", got)
 	}
-	if got := pick(t, cs, selectNearest(cs, defaultSubtypes, DefaultFallbackDistance)); got != "Cavtat" {
+	if got := pick(t, cs, selectNearest(cs, defaultSubtypes, DefaultFallbackDistance, RoleCity)); got != "Cavtat" {
 		t.Errorf("nearest listed subtype, got %s", got)
 	}
-	if selectNearest(cs, defaultSubtypes, 0) != -1 {
+	if selectNearest(cs, defaultSubtypes, 0, RoleCity) != -1 {
 		t.Error("fallback selected at bound zero")
 	}
 	cs = []Candidate{cand("locality", "Far", 0.01, dist(0.02)), cand("locality", "Inside", 0.01)}
-	if selectNearest(cs, defaultSubtypes, DefaultFallbackDistance) != -1 {
+	if selectNearest(cs, defaultSubtypes, DefaultFallbackDistance, RoleCity) != -1 {
 		t.Error("beyond the bound or containing candidate selected")
 	}
 }

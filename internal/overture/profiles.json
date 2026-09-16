@@ -7,7 +7,7 @@
     "DE": {
       "preferredSubtypes": ["county", "locality", "localadmin", "borough", "macrohood", "neighborhood", "microhood"],
       "tieBreakMode": "largest-area",
-      "rejectNamePrefixes": ["Landkreis ", "Kreis ", "GVV ", "VVG ", "Samtgemeinde ", "Verwaltungsgemeinschaft "]
+      "rejectNamePatterns": ["kreis($|\\s)", "(region|district)($|\\s)", "^(GVV|VVG|Samtgemeinde|Verwaltungsgemeinschaft|Regionalverband) "]
     },
     "FI": {
       "preferredSubtypes": ["locality", "localadmin", "borough", "macrohood", "neighborhood", "microhood"],
