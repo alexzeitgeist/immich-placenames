@@ -75,8 +75,9 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	t.Setenv("DB_USERNAME", "postgres")
 	t.Setenv("DB_PASSWORD", "secret")
 	t.Setenv("DB_DATABASE_NAME", "immich")
-	t.Setenv("DB_HOST", "")
+	t.Setenv("DB_HOSTNAME", "")
 	t.Setenv("DB_PORT", "")
+	t.Setenv("DB_URL", "")
 
 	// Empty host and port use the connection defaults.
 	got, err := ConfigFromEnv()
@@ -90,7 +91,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		t.Fatalf("Port=%q, want 5432", got.Port)
 	}
 
-	t.Setenv("DB_HOST", "127.0.0.1")
+	t.Setenv("DB_HOSTNAME", "127.0.0.1")
 	t.Setenv("DB_PORT", "15432")
 	got, err = ConfigFromEnv()
 	if err != nil {
@@ -98,6 +99,116 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	}
 	if got.Host != "127.0.0.1" || got.Port != "15432" {
 		t.Fatalf("Host=%q Port=%q, want 127.0.0.1 15432", got.Host, got.Port)
+	}
+}
+
+func TestConfigFromEnvURL(t *testing.T) {
+	const dsn = "postgres://immich:secret@pg.example.com:6543/photos?sslmode=require"
+	t.Setenv("DB_URL", dsn)
+	t.Setenv("DB_HOSTNAME", "")
+	t.Setenv("DB_PORT", "")
+	t.Setenv("DB_USERNAME", "")
+	t.Setenv("DB_PASSWORD", "")
+	t.Setenv("DB_DATABASE_NAME", "")
+
+	got, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Host != "pg.example.com" || got.Port != "6543" || got.User != "immich" || got.Database != "photos" {
+		t.Fatalf("Host=%q Port=%q User=%q Database=%q", got.Host, got.Port, got.User, got.Database)
+	}
+	if got.DSN() != dsn {
+		t.Fatalf("DSN=%q, want %q", got.DSN(), dsn)
+	}
+
+	// DB_URL overrides the individual variables.
+	t.Setenv("DB_HOSTNAME", "other.example.com")
+	t.Setenv("DB_PORT", "5432")
+	t.Setenv("DB_USERNAME", "other")
+	t.Setenv("DB_PASSWORD", "other")
+	t.Setenv("DB_DATABASE_NAME", "other")
+	if got, err = ConfigFromEnv(); err != nil || got.Host != "pg.example.com" || got.DSN() != dsn {
+		t.Fatalf("Host=%q DSN=%q: %v", got.Host, got.DSN(), err)
+	}
+
+	// Invalid DB_URL must fail even when the individual variables are valid.
+	t.Setenv("DB_URL", "postgres://immich@pg.example.com:none/photos")
+	if _, err := ConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "DB_URL") {
+		t.Fatalf("err=%v, want a DB_URL error", err)
+	}
+}
+
+func TestConfigFromEnvURLLibpqCompat(t *testing.T) {
+	t.Setenv("PGSSLMODE", "")
+	t.Setenv("PGSSLROOTCERT", "")
+	for _, mode := range []string{"require", "verify-full", "disable"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("DB_URL", "postgresql://immich:s%40cret@pg.example.com:6543/photos?sslmode="+mode+"&uselibpqcompat=true&application_name=place%20names")
+			cfg, err := ConfigFromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := pgx.ParseConfig(cfg.DSN())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := parsed.RuntimeParams["uselibpqcompat"]; ok {
+				t.Fatal("client-only option would be sent to PostgreSQL")
+			}
+			if parsed.Host != "pg.example.com" || parsed.Port != 6543 || parsed.User != "immich" || parsed.Password != "s@cret" || parsed.Database != "photos" || parsed.RuntimeParams["application_name"] != "place names" {
+				t.Fatal("normalization changed connection settings")
+			}
+			if mode == "disable" {
+				if parsed.TLSConfig != nil {
+					t.Fatal("sslmode=disable enabled TLS")
+				}
+				return
+			}
+			if parsed.TLSConfig == nil || len(parsed.Fallbacks) != 0 {
+				t.Fatal("connection must require TLS without plaintext fallback")
+			}
+			if parsed.TLSConfig.InsecureSkipVerify != (mode == "require") {
+				t.Fatalf("incorrect certificate verification for sslmode=%s", mode)
+			}
+		})
+	}
+}
+
+func TestConfigFromEnvConnectionStrings(t *testing.T) {
+	for _, tt := range []struct {
+		name, dsn, want string
+	}{
+		{"keywords", "host=pg.example.com port=6543 user=immich password='a b' dbname=photos sslmode=require", ""},
+		{"unchanged", "postgres://immich:secret@pg.example.com/photos?application_name=a+b%20c&sslmode=require", ""},
+		{"query", "postgres://immich:secret@pg.example.com/photos?application_name=first&uselibpqcompat=true&application_name=a+b%20c&use%6cibpqcompat=true&sslmode=require", "postgres://immich:secret@pg.example.com/photos?application_name=first&application_name=a+b%20c&sslmode=require"},
+		{"multiple hosts", "postgres://immich:secret@[::1]:5432,[::2]:5433/photos?uselibpqcompat=true&sslmode=require", "postgres://immich:secret@[::1]:5432,[::2]:5433/photos?sslmode=require"},
+		{"password", "postgres://immich:a?b@pg.example.com/photos?uselibpqcompat=true&sslmode=require", "postgres://immich:a?b@pg.example.com/photos?sslmode=require"},
+		{"only option", "postgresql://immich:secret@pg.example.com/photos?uselibpqcompat=true", "postgresql://immich:secret@pg.example.com/photos?"},
+		{"no query", "postgresql://immich:secret@pg.example.com/photos", ""},
+		{"spaces", "postgres://immich:secret@pg.example.com/photos? uselibpqcompat =true&sslmode=require", "postgres://immich:secret@pg.example.com/photos?sslmode=require"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("DB_URL", tt.dsn)
+			cfg, err := ConfigFromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := tt.want
+			if want == "" {
+				want = tt.dsn
+			}
+			if cfg.DSN() != want {
+				t.Fatalf("DSN=%q, want %q", cfg.DSN(), want)
+			}
+			parsed, err := pgx.ParseConfig(cfg.DSN())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := parsed.RuntimeParams["uselibpqcompat"]; ok {
+				t.Fatal("uselibpqcompat remains in connection parameters")
+			}
+		})
 	}
 }
 

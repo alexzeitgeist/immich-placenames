@@ -129,6 +129,7 @@ func isUsage(err error) bool {
 func TestFlagsPerCommand(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "none.json")
 	t.Setenv("DB_USERNAME", "")
+	t.Setenv("DB_URL", "")
 	a := quiet(t.TempDir())
 	if err := a.call("lookup", "-profiles", missing, "-json", "42.65", "18.07"); !errors.Is(err, os.ErrNotExist) || a.profilesPath != missing {
 		t.Errorf("lookup -profiles: %v, path %q", err, a.profilesPath)
@@ -237,6 +238,7 @@ func TestInvalidInputRejected(t *testing.T) {
 		t.Errorf("limit -1: %v", err)
 	}
 	t.Setenv("DB_USERNAME", "")
+	t.Setenv("DB_URL", "")
 	for _, args := range [][]string{{"fetch", "-workers", "0", "world"}, {"lookup", "-workers", "0", "1", "-1"}, {"run", "-workers", "0"}} {
 		if err := a.call(args...); !isUsage(err) || !strings.Contains(err.Error(), "-workers") {
 			t.Errorf("%v: %v", args, err)
@@ -250,6 +252,7 @@ func TestStatusOptions(t *testing.T) {
 	writeWorld(t, dir, cache.Header{Kind: "world", Release: "2026-01-01.0"})
 	writePoints(t, dir, "CH", cache.Header{Kind: "points", Code: "CH", Release: "2026-01-01.0"})
 	t.Setenv("DB_USERNAME", "")
+	t.Setenv("DB_URL", "")
 	var out strings.Builder
 	a := quiet("data")
 	a.out = &out

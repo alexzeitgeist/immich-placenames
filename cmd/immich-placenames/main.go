@@ -50,7 +50,7 @@ var commands = []command{
 	{"version", "", false, (*app).version},
 }
 
-const dbText = "Database: DB_HOST (database), DB_PORT (5432), DB_USERNAME, DB_PASSWORD, DB_DATABASE_NAME.\n"
+const dbText = "Database: DB_URL, or DB_HOSTNAME (database), DB_PORT (5432), DB_USERNAME, DB_PASSWORD, DB_DATABASE_NAME.\n"
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))

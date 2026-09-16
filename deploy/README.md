@@ -21,7 +21,7 @@ sudo install -m 0600 deploy/.env.example /opt/immich-placenames/.env
 sudo install -d -o 10001 -g 10001 -m 0755 /opt/immich-placenames/data
 ```
 
-Fill in the database credentials in `/opt/immich-placenames/.env`. Set `IMMICH_NETWORK` to your Immich network and `DB_HOST` to the database service alias on that network. The defaults are `immich_default` and `database`. Build or load the image on this host; there is no published image yet.
+Fill in the database credentials in `/opt/immich-placenames/.env`. Set `IMMICH_NETWORK` to your Immich network and `DB_HOSTNAME` to the database service alias on that network. The defaults are `immich_default` and `database`. You can also set `DB_URL` instead of the individual database variables. Build or load the image on this host; there is no published image yet.
 
 You can start with the bundled profiles. For different languages or boundary preferences, follow the [profile guide](../HOWTO.md#profiles) and save your settings in `/opt/immich-placenames/data/profiles.json`. The file must be readable by UID 10001.
 

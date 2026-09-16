@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,18 +20,22 @@ import (
 // Config is the connection, from the DB_* variables Immich's .env defines.
 type Config struct {
 	Host, Port, User, Password, Database string
+	url                                  string
 }
 
-// ConfigFromEnv reads DB_HOST (default database), DB_PORT (default 5432),
-// DB_USERNAME, DB_PASSWORD and DB_DATABASE_NAME.
+// ConfigFromEnv reads DB_URL, or DB_HOSTNAME (default database), DB_PORT
+// (default 5432), DB_USERNAME, DB_PASSWORD and DB_DATABASE_NAME.
 func ConfigFromEnv() (Config, error) {
+	if s := os.Getenv("DB_URL"); s != "" {
+		return configFromURL(s)
+	}
 	env := func(k, def string) string {
 		if v := os.Getenv(k); v != "" {
 			return v
 		}
 		return def
 	}
-	c := Config{Host: env("DB_HOST", "database"), Port: env("DB_PORT", "5432"),
+	c := Config{Host: env("DB_HOSTNAME", "database"), Port: env("DB_PORT", "5432"),
 		User: os.Getenv("DB_USERNAME"), Password: os.Getenv("DB_PASSWORD"), Database: os.Getenv("DB_DATABASE_NAME")}
 	if c.User == "" || c.Password == "" || c.Database == "" {
 		return c, errors.New("DB_USERNAME, DB_PASSWORD and DB_DATABASE_NAME must be set")
@@ -37,8 +43,44 @@ func ConfigFromEnv() (Config, error) {
 	return c, nil
 }
 
-// DSN is the connection URL.
+func configFromURL(s string) (Config, error) {
+	parsed, err := pgx.ParseConfig(s)
+	if err != nil {
+		return Config{}, fmt.Errorf("DB_URL: %w", err)
+	}
+	// pgx already follows libpq's TLS rules. Strip uselibpqcompat so PostgreSQL
+	// doesn't reject it as an unknown session parameter.
+	if scheme, rest, ok := strings.Cut(s, "://"); ok && (scheme == "postgres" || scheme == "postgresql") {
+		// PostgreSQL URLs allow multiple hosts and '?' in passwords, which
+		// net/url does not parse. Skip userinfo before finding the query.
+		if i := strings.IndexAny(rest, "@/"); i >= 0 && rest[i] == '@' {
+			rest = rest[i+1:]
+		}
+		_, query, hasQuery := strings.Cut(rest, "?")
+		parts := strings.Split(query, "&")
+		kept := parts[:0]
+		for _, part := range parts {
+			key, _, _ := strings.Cut(part, "=")
+			key, _ = url.PathUnescape(strings.Trim(key, " "))
+			if key != "uselibpqcompat" {
+				kept = append(kept, part)
+			}
+		}
+		// Keep the encoding: pgx reads '+' literally;
+		// url.Values.Encode uses it for spaces.
+		if hasQuery && len(kept) != len(parts) {
+			s = s[:len(s)-len(query)] + strings.Join(kept, "&")
+		}
+	}
+	return Config{Host: parsed.Host, Port: strconv.Itoa(int(parsed.Port)), User: parsed.User,
+		Password: parsed.Password, Database: parsed.Database, url: s}, nil
+}
+
+// DSN returns the connection string.
 func (c Config) DSN() string {
+	if c.url != "" {
+		return c.url
+	}
 	u := url.URL{Scheme: "postgres", User: url.UserPassword(c.User, c.Password), Host: net.JoinHostPort(c.Host, c.Port), Path: "/" + c.Database}
 	return u.String()
 }

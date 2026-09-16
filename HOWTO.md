@@ -18,17 +18,22 @@ Add `-data /data` to `fetch`, `lookup`, `run` and `status`. Profile and ID files
 
 ## Database connection
 
-`run`, `status` and `reset` need these environment variables:
+Configure the database for `run`, `status` and `reset` with these environment variables:
 
 | Variable | Binary default |
 |---|---|
-| `DB_HOST` | `database` |
+| `DB_URL` | Unset |
+| `DB_HOSTNAME` | `database` |
 | `DB_PORT` | `5432` |
-| `DB_USERNAME` | Required |
-| `DB_PASSWORD` | Required |
-| `DB_DATABASE_NAME` | Required |
+| `DB_USERNAME` | Required unless `DB_URL` is set |
+| `DB_PASSWORD` | Required unless `DB_URL` is set |
+| `DB_DATABASE_NAME` | Required unless `DB_URL` is set |
 
-Export your Immich database credentials before running the binary; it does not read `.env`. Compose reads `.env` and passes the values to the container, defaulting to user `postgres` and database `immich`.
+`DB_URL` overrides the other five variables, as in Immich. It accepts a URL or a keyword/value connection string. Export your Immich database credentials before running the binary; it does not read `.env`. Compose reads `.env` and passes the values to the container, defaulting to user `postgres` and database `immich`.
+
+If your Immich database URL includes `uselibpqcompat=true`, you can reuse it unchanged. When upgrading from a version that used `DB_HOST`, rename that variable to `DB_HOSTNAME`.
+
+With `sslmode=require` and no `uselibpqcompat`, [Immich](https://docs.immich.app/install/environment-variables/#database) verifies the server certificate. This tool requires encryption but skips certificate verification unless you configure a root certificate. Use `sslmode=verify-full` or add `sslrootcert=system` to verify the certificate and hostname using system roots. For a private certificate authority, use `sslmode=verify-full&sslrootcert=/path/to/ca.crt`. The process or container must be able to read the CA file.
 
 `database` normally resolves inside Immich's Docker network. When running outside Docker, set a reachable database address. The Compose setup uses the existing network without publishing a database port.
 
@@ -88,7 +93,7 @@ With the database variables exported and `psql` installed, export the current na
 
 ```sh
 PGPASSWORD="$DB_PASSWORD" psql -X \
-  -h "${DB_HOST:-database}" -p "${DB_PORT:-5432}" \
+  -h "${DB_HOSTNAME:-database}" -p "${DB_PORT:-5432}" \
   -U "$DB_USERNAME" -d "$DB_DATABASE_NAME" \
   -c 'COPY (
     SELECT a.id, e.latitude, e.longitude, e.city, e.state, e.country
@@ -102,6 +107,8 @@ python3 deploy/compare.py database-names.csv proposed-names.csv
 ```
 
 For a database reachable only inside Docker, run the same `COPY` query through `psql` in its container. Keep CSV format so commas in names are quoted.
+
+If you use `DB_URL`, replace the `-h`, `-p`, `-U` and `-d` options above with `--dbname="$DB_URL"`. Remove `uselibpqcompat` from the URL passed to `psql`; `psql` does not accept that option.
 
 The script counts equal and changed names for matching asset IDs and lists each rename. Check the resolved count and logs too: unmatched or failed assets are not counted as differences.
 
@@ -407,6 +414,7 @@ Exit codes are 0 for success, 2 for usage errors and 1 for operational failures.
 | `flag provided but not defined` | Check `COMMAND -h`; flags differ by command |
 | `profiles: open ...` | Check the path; containers see the mounted file under `/data` |
 | `DB_USERNAME, DB_PASSWORD and DB_DATABASE_NAME must be set` | Supply the database environment |
+| `DB_URL: ...` | Correct the connection string; URL and keyword/value forms are accepted |
 | `mixed cache releases` | Refetch the required caches with the same `-release` |
 | `cache invalid, treated as absent` | Refetch the damaged or incompatible cache |
 | `cache has no ..., falling back; refetch it` | Refetch for the missing name languages |
